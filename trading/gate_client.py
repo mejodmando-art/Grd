@@ -2,7 +2,7 @@ import ccxt
 import os
 
 def _client():
-    return ccxt.gateio({
+    return ccxt.gate({
         'apiKey': os.getenv('GATE_API_KEY', ''),
         'secret': os.getenv('GATE_API_SECRET', ''),
         'options': {'defaultType': 'spot'},
