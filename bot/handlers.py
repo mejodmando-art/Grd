@@ -1,4 +1,5 @@
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -32,21 +33,20 @@ from bot.keyboards import (
     settings_keyboard, back_to_menu_keyboard, signal_form_keyboard,
 )
 from bot.messages import (
-    WELCOME_MSG, SETTINGS_MSG, API_KEY_INSTRUCTIONS,
+    WELCOME_MSG, SETTINGS_MSG,
     SIGNAL_STEP1, SIGNAL_STEP2, SIGNAL_STEP3,
 )
 
 logger = logging.getLogger(__name__)
 
-# Conversation states
+# Conversation states (تم حذف AWAIT_API_KEYS)
 (
-    AWAIT_API_KEYS,
     AWAIT_DEFAULT_AMOUNT,
     AWAIT_CUSTOM_AMOUNT,
     AWAIT_SIGNAL_SYMBOL,
     AWAIT_SIGNAL_DIRECTION,
     AWAIT_SIGNAL_LEVELS,
-) = range(6)
+) = range(5)
 
 # Temp storage for multi-step conversations
 _pending: dict = {}
@@ -106,13 +106,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "recent_signals":
         await show_recent_signals(update, context)
 
-    # ── Settings ──
+    # ── Settings (تم حذف set_api_keys) ──
     elif data == "settings":
         await query.edit_message_text(SETTINGS_MSG, reply_markup=settings_keyboard(), parse_mode="HTML")
-
-    elif data == "set_api_keys":
-        context.user_data["state"] = AWAIT_API_KEYS
-        await query.edit_message_text(API_KEY_INSTRUCTIONS, reply_markup=back_to_menu_keyboard(), parse_mode="HTML")
 
     elif data == "set_default_amount":
         context.user_data["state"] = AWAIT_DEFAULT_AMOUNT
@@ -199,10 +195,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = await ensure_user(update, context)
 
-    if state == AWAIT_API_KEYS:
-        await handle_api_keys_input(update, context, user_id, text)
+    # تم حذف التعامل مع AWAIT_API_KEYS
 
-    elif state == AWAIT_DEFAULT_AMOUNT:
+    if state == AWAIT_DEFAULT_AMOUNT:
         try:
             amount = float(text)
             if amount <= 0:
@@ -245,24 +240,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── ACTION HANDLERS ──────────────────────────────────────────────────────────
 
-async def handle_api_keys_input(update, context, user_id, text):
-    parts = text.split("|")
-    if len(parts) != 2:
-        await update.message.reply_text(
-            "❌ التنسيق خاطئ. أرسل: <code>API_KEY|API_SECRET</code>",
-            parse_mode="HTML",
-        )
-        return
-    api_key, api_secret = parts[0].strip(), parts[1].strip()
-    msg = await update.message.reply_text("⏳ جاري التحقق من المفاتيح...")
-    valid = await validate_api_keys(api_key, api_secret)
-    if not valid:
-        await msg.edit_text("❌ المفاتيح غير صحيحة. تحقق منها وحاول مجدداً.")
-        return
-    await update_user(user_id, {"mexc_api_key": api_key, "mexc_api_secret": api_secret})
-    context.user_data.pop("state", None)
-    await msg.edit_text("✅ تم حفظ مفاتيح API بنجاح!", reply_markup=main_menu_keyboard())
-
+# تم حذف دالة handle_api_keys_input بالكامل
 
 async def handle_signal_levels_input(update, context, user_id, text):
     symbol = context.user_data.get("signal_symbol", "")
@@ -360,10 +338,13 @@ async def broadcast_signal(bot, signal: Signal, signal_id: str):
 
 async def execute_signal_for_user(update: Update, context, user: dict, signal_id: str, amount: float):
     query = update.callback_query
-    if not user.get("mexc_api_key"):
+    # استخدام مفاتيح البيئة العامة بدلاً من طلبها من المستخدم
+    api_key = os.getenv("MEXC_API_KEY")
+    api_secret = os.getenv("MEXC_API_SECRET")
+    if not api_key or not api_secret:
         await query.edit_message_text(
-            "❌ لم تقم بإضافة مفاتيح API بعد.\nاذهب إلى ⚙️ الإعدادات لإضافتها.",
-            reply_markup=settings_keyboard(),
+            "❌ مفاتيح MEXC غير مضبوطة على الخادم.",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -378,8 +359,8 @@ async def execute_signal_for_user(update: Update, context, user: dict, signal_id
 
     try:
         result = await place_buy_order(
-            api_key=user["mexc_api_key"],
-            api_secret=user["mexc_api_secret"],
+            api_key=api_key,
+            api_secret=api_secret,
             symbol=signal_data["symbol"],
             usdt_amount=amount,
         )
@@ -424,10 +405,12 @@ async def execute_signal_for_user(update: Update, context, user: dict, signal_id
 
 async def execute_signal_for_user_msg(update: Update, context, user: dict, signal_id: str, amount: float):
     """Same as above but triggered from a text message (custom amount)."""
-    if not user.get("mexc_api_key"):
+    api_key = os.getenv("MEXC_API_KEY")
+    api_secret = os.getenv("MEXC_API_SECRET")
+    if not api_key or not api_secret:
         await update.message.reply_text(
-            "❌ لم تقم بإضافة مفاتيح API.\nاذهب إلى ⚙️ الإعدادات.",
-            reply_markup=settings_keyboard(),
+            "❌ مفاتيح MEXC غير مضبوطة على الخادم.",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -440,8 +423,8 @@ async def execute_signal_for_user_msg(update: Update, context, user: dict, signa
     msg_obj = await update.message.reply_text(f"⏳ جاري تنفيذ الصفقة بمبلغ <code>${amount}</code>...", parse_mode="HTML")
     try:
         result = await place_buy_order(
-            api_key=user["mexc_api_key"],
-            api_secret=user["mexc_api_secret"],
+            api_key=api_key,
+            api_secret=api_secret,
             symbol=signal_data["symbol"],
             usdt_amount=amount,
         )
@@ -474,12 +457,14 @@ async def execute_signal_for_user_msg(update: Update, context, user: dict, signa
 
 async def show_balance(update: Update, context, user: dict):
     query = update.callback_query
-    if not user.get("mexc_api_key"):
-        await query.edit_message_text("❌ أضف مفاتيح API أولاً.", reply_markup=settings_keyboard())
+    api_key = os.getenv("MEXC_API_KEY")
+    api_secret = os.getenv("MEXC_API_SECRET")
+    if not api_key or not api_secret:
+        await query.edit_message_text("❌ مفاتيح MEXC غير مضبوطة على الخادم.", reply_markup=main_menu_keyboard())
         return
     await query.edit_message_text("⏳ جاري جلب الرصيد...")
     try:
-        bal = await get_balance(user["mexc_api_key"], user["mexc_api_secret"])
+        bal = await get_balance(api_key, api_secret)
         msg = (
             f"💰 <b>رصيدك على MEXC</b>\n\n"
             f"🟢 المتاح: <code>{bal['free']:.4f} USDT</code>\n"
