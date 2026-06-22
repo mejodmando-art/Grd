@@ -63,6 +63,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME_MSG, reply_markup=await main_menu_keyboard(), parse_mode="HTML")
 
 
+async def test_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اختبار اتصال Gate.io"""
+    msg = await update.message.reply_text("⏳ جاري اختبار Gate.io...")
+    api_key = os.getenv("GATE_API_KEY", "")
+    api_secret = os.getenv("GATE_API_SECRET", "")
+    
+    if not api_key or not api_secret:
+        await msg.edit_text("❌ متغيرات Gate.io غير موجودة في Railway.")
+        return
+    
+    try:
+        bal = await gate_balance(api_key, api_secret)
+        await msg.edit_text(f"✅ Gate.io متصل!\n💰 رصيد: {bal['free']:.2f} USDT")
+    except Exception as e:
+        await msg.edit_text(f"❌ فشل اتصال Gate.io:\n<code>{str(e)[:200]}</code>", parse_mode="HTML")
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -219,5 +236,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def register_handlers(app: Application):
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("test", test_gate))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
