@@ -1,106 +1,68 @@
-import hashlib
-import hmac
-import time
-import aiohttp
-import json
+import ccxt
+import os
 
-GATE_BASE = "https://api.gateio.ws/api/v4"
-
-def _sign(secret, method, path, query, body, timestamp):
-    s = f"{method}\n{path}\n{query}\n{body}\n{timestamp}"
-    return hmac.new(secret.encode('utf-8'), s.encode('utf-8'), hashlib.sha512).hexdigest()
+def _client():
+    return ccxt.gateio({
+        'apiKey': os.getenv('GATE_API_KEY', ''),
+        'secret': os.getenv('GATE_API_SECRET', ''),
+        'options': {'defaultType': 'spot'},
+    })
 
 def _normalize(symbol):
-    sym = symbol.replace("/", "_").upper()
-    if "_" not in sym:
-        sym = sym[:-4] + "_USDT" if sym.endswith("USDT") else sym + "_USDT"
-    return sym
+    if '/' in symbol:
+        return symbol
+    return symbol[:-4] + '/' + symbol[-4:]
 
-async def _request(method, path, api_key="", api_secret="", params=None, body=None):
-    async with aiohttp.ClientSession() as s:
-        url = f"{GATE_BASE}{path}"
-        headers = {}
-        
-        if api_key and api_secret:
-            qs = ""
-            if params:
-                qs = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-            body_str = json.dumps(body) if body else ""
-            ts = str(int(time.time()))
-            sig = _sign(api_secret, method, path, qs, body_str, ts)
-            headers = {
-                "KEY": api_key,
-                "SIGN": sig,
-                "Timestamp": ts,
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-        
-        full_url = url
-        if method == "GET" and params:
-            full_url = url + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-        
-        if method == "GET":
-            resp = await s.get(full_url, headers=headers)
-        else:
-            resp = await s.post(url, json=body, headers=headers)
-        
-        data = await resp.json()
-        
-        if resp.status >= 400:
-            raise Exception(f"Gate error {resp.status}: {data}")
-        return data
-
-async def get_ticker_price(symbol, api_key="", api_secret=""):
-    sym = _normalize(symbol)
-    data = await _request("GET", "/spot/tickers", params={"currency_pair": sym})
-    return float(data[0]["last"])
+async def get_ticker_price(symbol, api_key='', api_secret=''):
+    return _client().fetch_ticker(_normalize(symbol))['last']
 
 async def get_balance(api_key, api_secret):
-    data = await _request("GET", "/spot/accounts", api_key=api_key, api_secret=api_secret)
-    usdt = next((b for b in data if b["currency"] == "USDT"), None)
-    if not usdt:
-        return {"free": 0.0, "used": 0.0, "total": 0.0}
-    free = float(usdt["available"])
-    locked = float(usdt.get("locked", 0))
-    return {"free": free, "used": locked, "total": free + locked}
+    b = _client().fetch_balance().get('USDT', {})
+    f = float(b.get('free', 0))
+    u = float(b.get('used', 0))
+    return {'free': f, 'used': u, 'total': f + u}
 
 async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
-    sym = _normalize(symbol)
-    tickers = await _request("GET", "/spot/tickers", params={"currency_pair": sym})
-    price = float(tickers[0]["last"])
-    qty = usdt_amount / price
-    body = {"currency_pair": sym, "side": "buy", "type": "market", "amount": str(round(qty, 6)), "time_in_force": "ioc"}
-    order = await _request("POST", "/spot/orders", api_key=api_key, api_secret=api_secret, body=body)
-    filled_qty = float(order.get("filled_amount", qty))
-    filled_total = float(order.get("filled_total", usdt_amount))
-    filled_price = filled_total / filled_qty if filled_qty else price
-    return {"order_id": str(order.get("id", "")), "symbol": symbol, "side": "buy", "quantity": filled_qty, "entry_price": round(filled_price, 8), "cost": usdt_amount}
+    e = _client()
+    p = e.fetch_ticker(_normalize(symbol))['last']
+    q = usdt_amount / p
+    o = e.create_market_buy_order(_normalize(symbol), q)
+    filled = float(o['filled'])
+    cost = float(o['cost'])
+    return {
+        'order_id': o['id'],
+        'symbol': symbol,
+        'side': 'buy',
+        'quantity': filled,
+        'entry_price': round(cost / filled if filled else p, 8),
+        'cost': usdt_amount,
+    }
 
 async def place_sell_order(api_key, api_secret, symbol, quantity):
-    sym = _normalize(symbol)
-    body = {"currency_pair": sym, "side": "sell", "type": "market", "amount": str(quantity), "time_in_force": "ioc"}
-    order = await _request("POST", "/spot/orders", api_key=api_key, api_secret=api_secret, body=body)
-    filled_qty = float(order.get("filled_amount", quantity))
-    filled_total = float(order.get("filled_total", 0))
-    close_price = filled_total / filled_qty if filled_qty else 0
-    return {"order_id": str(order.get("id", "")), "symbol": symbol, "side": "sell", "quantity": filled_qty, "close_price": round(close_price, 8), "cost": filled_total}
+    o = _client().create_market_sell_order(_normalize(symbol), quantity)
+    filled = float(o['filled'])
+    cost = float(o['cost'])
+    return {
+        'order_id': o['id'],
+        'symbol': symbol,
+        'side': 'sell',
+        'quantity': filled,
+        'close_price': round(cost / filled if filled else 0, 8),
+        'cost': cost,
+    }
 
-async def get_klines(symbol, interval="5m", limit=60):
-    sym = _normalize(symbol)
-    data = await _request("GET", "/spot/candlesticks", params={"currency_pair": sym, "interval": interval, "limit": limit})
-    candles = []
-    for k in data:
-        if len(k) >= 6:
-            candles.append({"open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])})
-    return candles
+async def get_klines(symbol, interval='5m', limit=60):
+    ohlcv = _client().fetch_ohlcv(_normalize(symbol), timeframe=interval, limit=limit)
+    return [{'open': o[1], 'high': o[2], 'low': o[3], 'close': o[4], 'volume': o[5]} for o in ohlcv]
 
 async def get_top_symbols(count=300):
-    data = await _request("GET", "/spot/tickers")
-    symbols = []
-    for item in data:
-        symbol = item.get("currency_pair", "")
-        if symbol.endswith("_USDT"):
-            symbols.append({"symbol": symbol.replace("_", ""), "volume": float(item.get("quote_volume", 0))})
-    symbols.sort(key=lambda x: x["volume"], reverse=True)
-    return [s["symbol"] for s in symbols[:count]]
+    syms = []
+    for s, t in _client().fetch_tickers().items():
+        if s.endswith('/USDT'):
+            try:
+                vol = float(t.get('quoteVolume', 0))
+                syms.append({'symbol': s.replace('/', ''), 'volume': vol})
+            except:
+                continue
+    syms.sort(key=lambda x: x['volume'], reverse=True)
+    return [s['symbol'] for s in syms[:count]]
