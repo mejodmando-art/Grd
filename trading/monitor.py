@@ -8,7 +8,14 @@ from database.client import (
     get_all_open_trades, update_trade, save_trade, get_all_active_users
 )
 from trading.mexc_client import (
-    get_ticker_price, place_buy_order, place_sell_order, get_klines, get_top_symbols, get_balance
+    get_ticker_price as mexc_price, place_buy_order as mexc_buy,
+    place_sell_order as mexc_sell, get_klines as mexc_klines,
+    get_top_symbols as mexc_top, get_balance as mexc_balance
+)
+from trading.gate_client import (
+    get_ticker_price as gate_price, place_buy_order as gate_buy,
+    place_sell_order as gate_sell, get_klines as gate_klines,
+    get_top_symbols as gate_top, get_balance as gate_balance
 )
 from config import (
     MONITOR_INTERVAL, EMA_TOP_SYMBOLS_COUNT, EMA_FAST, EMA_SLOW,
@@ -44,22 +51,40 @@ def calculate_ema(prices: list, period: int) -> list:
     return [None] * (period - 1) + ema_values
 
 
-async def get_symbols_to_scan() -> list:
+async def get_api_for_user(user: dict):
+    """تحديد المنصة المناسبة للمستخدم"""
+    exchange = user.get("exchange", "mexc")
+    if exchange == "gate":
+        return "gate", os.getenv("GATE_API_KEY", ""), os.getenv("GATE_API_SECRET", "")
+    elif exchange == "both":
+        return "both", os.getenv("MEXC_API_KEY", ""), os.getenv("MEXC_API_SECRET", "")
+    return "mexc", os.getenv("MEXC_API_KEY", ""), os.getenv("MEXC_API_SECRET", "")
+
+
+async def get_symbols_to_scan(user_exchange: str = "mexc") -> list:
     global _top_symbols_cache, _last_cache_time
     now = time.time()
+    cache_key = f"ema_{user_exchange}"
     if not _top_symbols_cache or (now - _last_cache_time) > 600:
         try:
-            _top_symbols_cache = await get_top_symbols(EMA_TOP_SYMBOLS_COUNT)
+            if user_exchange in ["gate"]:
+                _top_symbols_cache = await gate_top(EMA_TOP_SYMBOLS_COUNT)
+            else:
+                _top_symbols_cache = await mexc_top(EMA_TOP_SYMBOLS_COUNT)
             _last_cache_time = now
-            logger.info(f"تم تحديث قائمة {len(_top_symbols_cache)} عملة")
+            logger.info(f"EMA: تم تحديث {len(_top_symbols_cache)} عملة من {user_exchange}")
         except Exception as e:
-            logger.error(f"خطأ في جلب العملات: {e}")
+            logger.error(f"EMA خطأ: {e}")
     return _top_symbols_cache or ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
 
-async def analyze_symbol(symbol: str) -> dict | None:
+async def analyze_symbol(symbol: str, exchange: str = "mexc") -> dict | None:
     try:
-        klines = await get_klines(symbol, EMA_KLINE_INTERVAL, EMA_KLINE_LIMIT)
+        if exchange == "gate":
+            klines = await gate_klines(symbol, EMA_KLINE_INTERVAL, EMA_KLINE_LIMIT)
+        else:
+            klines = await mexc_klines(symbol, EMA_KLINE_INTERVAL, EMA_KLINE_LIMIT)
+            
         if len(klines) < 25:
             return None
         closes = [c["close"] for c in klines]
@@ -98,60 +123,82 @@ async def send_notification(user_id: int, message: str):
             pass
 
 
-async def open_trade(signal: dict, user_id: int, amount: float):
+async def open_trade(signal: dict, user_id: int, amount: float, exchange: str = "mexc"):
     global _failed_symbols
-    api_key = os.getenv("MEXC_API_KEY", "")
-    api_secret = os.getenv("MEXC_API_SECRET", "")
     link = tv_link(signal["symbol"])
     symbol = signal["symbol"]
+
+    if exchange == "gate":
+        api_key = os.getenv("GATE_API_KEY", "")
+        api_secret = os.getenv("GATE_API_SECRET", "")
+        balance_func = gate_balance
+        buy_func = gate_buy
+    else:
+        api_key = os.getenv("MEXC_API_KEY", "")
+        api_secret = os.getenv("MEXC_API_SECRET", "")
+        balance_func = mexc_balance
+        buy_func = mexc_buy
 
     if not api_key or not api_secret:
         return
 
-    balance = await get_balance(api_key, api_secret)
+    try:
+        balance = await balance_func(api_key, api_secret)
+    except:
+        return
+
     if balance["free"] < amount:
         now = time.time()
         if (now - _failed_symbols.get(symbol, 0)) > 900:
             _failed_symbols[symbol] = now
             await send_notification(user_id,
-                f"[EMA] ❌ <b>رصيد غير كافٍ!</b>\n🪙 {symbol}\n💰 مطلوب: ${amount}\n🏦 متاح: ${balance['free']:.2f}"
+                f"[EMA-{exchange.upper()}] ❌ <b>رصيد غير كافٍ!</b>\n🪙 {symbol}\n💰 مطلوب: ${amount}\n🏦 متاح: ${balance['free']:.2f}"
             )
         return
 
     try:
-        result = await place_buy_order(api_key, api_secret, symbol, amount)
+        result = await buy_func(api_key, api_secret, symbol, amount)
         trade = {
             "user_id": user_id, "symbol": symbol,
             "side": "buy", "entry_price": result["entry_price"],
             "amount": amount, "quantity": result["quantity"],
             "take_profit": signal["take_profit"], "stop_loss": signal["stop_loss"],
             "status": "open", "order_id": result["order_id"],
-            "signal_id": "ema_auto", "strategy": "EMA",
+            "signal_id": "ema_auto", "strategy": "EMA", "exchange": exchange.upper(),
         }
         await save_trade(trade)
-        logger.info(f"✅ صفقة: {symbol}")
+        logger.info(f"✅ EMA صفقة: {symbol} على {exchange}")
         _failed_symbols.pop(symbol, None)
         await send_notification(user_id,
-            f"[EMA] ✅ <b>صفقة جديدة!</b>\n🪙 {symbol}\n📥 دخول: <code>{signal['entry_price']}</code>\n💵 مبلغ: ${amount}\n🔗 <a href='{link}'>TradingView</a>"
+            f"[EMA-{exchange.upper()}] ✅ <b>صفقة!</b>\n🪙 {symbol}\n📥 <code>{signal['entry_price']}</code>\n💵 ${amount}\n🔗 <a href='{link}'>TV</a>"
         )
     except Exception as e:
         now = time.time()
         if (now - _failed_symbols.get(symbol, 0)) > 900:
             _failed_symbols[symbol] = now
             await send_notification(user_id,
-                f"[EMA] ❌ <b>فشل!</b>\n🪙 {symbol}\n⚠️ {str(e)[:150]}\n🔗 <a href='{link}'>TradingView</a>"
+                f"[EMA-{exchange.upper()}] ❌ <b>فشل!</b>\n🪙 {symbol}\n⚠️ {str(e)[:150]}"
             )
-        logger.error(f"فشل: {symbol}: {e}")
+        logger.error(f"EMA فشل {symbol}: {e}")
 
 
 async def close_trade(trade: dict, price: float, reason: str):
-    api_key = os.getenv("MEXC_API_KEY", "")
-    api_secret = os.getenv("MEXC_API_SECRET", "")
+    exchange = trade.get("exchange", "MEXC").lower()
+    if exchange == "gate":
+        api_key = os.getenv("GATE_API_KEY", "")
+        api_secret = os.getenv("GATE_API_SECRET", "")
+        sell_func = gate_sell
+    else:
+        api_key = os.getenv("MEXC_API_KEY", "")
+        api_secret = os.getenv("MEXC_API_SECRET", "")
+        sell_func = mexc_sell
+
     if not api_key or not api_secret:
         return
+
     link = tv_link(trade["symbol"])
     try:
-        result = await place_sell_order(api_key, api_secret, trade["symbol"], trade["quantity"])
+        result = await sell_func(api_key, api_secret, trade["symbol"], trade["quantity"])
         price = result.get("close_price", price)
     except:
         pass
@@ -165,7 +212,7 @@ async def close_trade(trade: dict, price: float, reason: str):
     reason_text = "هدف ✅" if reason == "take_profit" else "وقف ❌"
     if _app:
         await _app.bot.send_message(trade["user_id"],
-            f"[EMA] {emoji} <b>إغلاق</b>\n🪙 {trade['symbol']}\n{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>\n📋 {reason_text}\n🔗 <a href='{link}'>TradingView</a>",
+            f"[EMA-{exchange.upper()}] {emoji} <b>إغلاق</b>\n🪙 {trade['symbol']}\n{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>\n📋 {reason_text}\n🔗 <a href='{link}'>TV</a>",
             parse_mode="HTML", disable_web_page_preview=True
         )
 
@@ -182,11 +229,14 @@ async def monitor_loop():
 
             trades = await get_all_open_trades()
             ema_trades = [t for t in trades if t.get("strategy") == "EMA"]
-            open_count = len(ema_trades)
 
             for t in ema_trades:
                 try:
-                    price = await get_ticker_price(t["symbol"])
+                    exchange = t.get("exchange", "MEXC").lower()
+                    if exchange == "gate":
+                        price = await gate_price(t["symbol"])
+                    else:
+                        price = await mexc_price(t["symbol"])
                     tp = float(t.get("take_profit") or 0)
                     sl = float(t.get("stop_loss") or 0)
                     if tp and price >= tp:
@@ -196,29 +246,35 @@ async def monitor_loop():
                 except:
                     pass
 
-            if open_count < EMA_MAX_OPEN_TRADES:
-                users = await get_all_active_users()
-                auto_users = [u for u in users if u.get("ema_trade", True)]
-                if auto_users:
-                    symbols = await get_symbols_to_scan()
-                    open_symbols = [t["symbol"] for t in ema_trades]
+            users = await get_all_active_users()
+            for user in users:
+                if not user.get("ema_trade", True):
+                    continue
+                exchange = user.get("exchange", "mexc")
+                exchanges_to_trade = ["mexc", "gate"] if exchange == "both" else [exchange]
+
+                for ex in exchanges_to_trade:
+                    open_count = len([t for t in ema_trades if t.get("exchange", "MEXC").lower() == ex])
+                    if open_count >= EMA_MAX_OPEN_TRADES:
+                        continue
+
+                    symbols = await get_symbols_to_scan(ex)
+                    open_symbols = [t["symbol"] for t in ema_trades if t.get("exchange", "MEXC").lower() == ex]
                     for sym in symbols:
                         if sym in open_symbols:
                             continue
-                        signal = await analyze_symbol(sym)
+                        signal = await analyze_symbol(sym, ex)
                         if signal:
                             link = tv_link(signal["symbol"])
-                            signal_key = f"ema_{signal['symbol']}_{signal['entry_price']:.2f}"
+                            signal_key = f"ema_{ex}_{signal['symbol']}_{signal['entry_price']:.2f}"
                             if signal_key not in _notified_signals:
                                 _notified_signals.add(signal_key)
-                                for user in auto_users:
-                                    await send_notification(user["id"],
-                                        f"[EMA] 🚨 <b>إشارة!</b>\n🪙 {signal['symbol']}\n📥 <code>{signal['entry_price']}</code>\n🔗 <a href='{link}'>TradingView</a>"
-                                    )
-                            for user in auto_users:
-                                amount = float(user.get("ema_amount", EMA_DEFAULT_AMOUNT))
-                                await open_trade(signal, user["id"], amount)
+                                await send_notification(user["id"],
+                                    f"[EMA-{ex.upper()}] 🚨 <b>إشارة!</b>\n🪙 {signal['symbol']}\n📥 <code>{signal['entry_price']}</code>\n🔗 <a href='{link}'>TV</a>"
+                                )
+                            amount = float(user.get("ema_amount", EMA_DEFAULT_AMOUNT))
+                            await open_trade(signal, user["id"], amount, ex)
                             break
         except Exception as e:
-            logger.error(f"خطأ: {e}")
+            logger.error(f"EMA خطأ: {e}")
         await asyncio.sleep(MONITOR_INTERVAL)
