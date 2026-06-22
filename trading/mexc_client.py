@@ -46,16 +46,10 @@ async def _signed_post(session: aiohttp.ClientSession, api_key: str, secret: str
 
 
 def _normalize(symbol: str) -> str:
-    """BTC/USDT or BTCUSDT -> BTCUSDT"""
     return symbol.replace("/", "").upper()
 
 
-# ═══════════════════════════════════════════════════════════════
-# الدوال العامة (تُستخدم في الواجهة وفي المراقبة)
-# ═══════════════════════════════════════════════════════════════
-
 async def get_ticker_price(symbol: str, api_key: str = "", api_secret: str = "") -> float:
-    """جلب آخر سعر لعملة"""
     sym = _normalize(symbol)
     async with aiohttp.ClientSession() as s:
         data = await _get(s, "/api/v3/ticker/price", {"symbol": sym})
@@ -63,7 +57,6 @@ async def get_ticker_price(symbol: str, api_key: str = "", api_secret: str = "")
 
 
 async def get_balance(api_key: str, api_secret: str) -> dict:
-    """جلب رصيد USDT"""
     async with aiohttp.ClientSession() as s:
         data = await _signed_get(s, api_key, api_secret, "/api/v3/account")
     usdt = next((b for b in data.get("balances", []) if b["asset"] == "USDT"), None)
@@ -75,14 +68,11 @@ async def get_balance(api_key: str, api_secret: str) -> dict:
 
 
 async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amount: float) -> dict:
-    """تنفيذ أمر شراء Spot"""
     sym = _normalize(symbol)
     async with aiohttp.ClientSession() as s:
-        # جلب السعر
         ticker = await _get(s, "/api/v3/ticker/price", {"symbol": sym})
         price = float(ticker["price"])
 
-        # جلب معلومات الرمز للدقة
         info = await _get(s, "/api/v3/exchangeInfo", {"symbol": sym})
         filters = info["symbols"][0].get("filters", []) if info.get("symbols") else []
         step = 0.000001
@@ -92,7 +82,6 @@ async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amoun
                 step = float(f.get("stepSize", step))
                 min_qty = float(f.get("minQty", min_qty))
 
-        # حساب الكمية وتقريبها
         qty = usdt_amount / price
         precision = len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 0
         qty = round(qty - (qty % step), precision)
@@ -100,7 +89,6 @@ async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amoun
         if qty < min_qty:
             raise ValueError(f"المبلغ صغير جداً. الحد الأدنى: {min_qty * price:.2f} USDT")
 
-        # إرسال الأمر
         order = await _signed_post(s, api_key, api_secret, "/api/v3/order", {
             "symbol": sym,
             "side": "BUY",
@@ -123,7 +111,6 @@ async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amoun
 
 
 async def place_sell_order(api_key: str, api_secret: str, symbol: str, quantity: float) -> dict:
-    """تنفيذ أمر بيع Spot"""
     sym = _normalize(symbol)
     async with aiohttp.ClientSession() as s:
         order = await _signed_post(s, api_key, api_secret, "/api/v3/order", {
@@ -149,7 +136,6 @@ async def place_sell_order(api_key: str, api_secret: str, symbol: str, quantity:
 
 
 async def validate_api_keys(api_key: str, api_secret: str) -> bool:
-    """التحقق من صحة المفاتيح"""
     try:
         await get_balance(api_key, api_secret)
         return True
@@ -158,12 +144,7 @@ async def validate_api_keys(api_key: str, api_secret: str) -> bool:
         return False
 
 
-# ═══════════════════════════════════════════════════════════════
-# دوال التحليل (تُستخدم في النظام الآلي)
-# ═══════════════════════════════════════════════════════════════
-
 async def get_klines(symbol: str, interval: str = "15m", limit: int = 60) -> list:
-    """جلب بيانات الشموع من MEXC"""
     sym = _normalize(symbol)
     async with aiohttp.ClientSession() as s:
         data = await _get(s, "/api/v3/klines", {
