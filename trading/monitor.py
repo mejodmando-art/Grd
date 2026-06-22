@@ -8,7 +8,8 @@ from database.client import (
     get_all_open_trades, update_trade, save_trade, get_all_active_users
 )
 from trading.mexc_client import (
-    get_ticker_price, place_buy_order, place_sell_order, get_klines, get_top_symbols
+    get_ticker_price, place_buy_order, place_sell_order, get_klines, get_top_symbols,
+    get_balance
 )
 from config import (
     MONITOR_INTERVAL, TOP_SYMBOLS_COUNT, EMA_FAST, EMA_SLOW,
@@ -21,10 +22,10 @@ _app = None
 _top_symbols_cache = []
 _last_cache_time = 0
 
-# منع تكرار الإشعارات
-_notified_signals = set()      # إشارات تم الإشعار عنها
-_failed_symbols = {}           # عملات فشلت مع وقت الفشل
-_skipped_symbols = set()       # عملات تم تخطيها مؤقتاً
+_notified_signals = set()
+_failed_symbols = {}
+_balance_checked = False
+_last_balance = 0
 
 def set_app(app):
     global _app
@@ -106,8 +107,20 @@ async def send_notification(user_id: int, message: str):
             logger.warning(f"فشل إرسال إشعار: {e}")
 
 
+async def check_balance(api_key: str, api_secret: str) -> float:
+    """يجلب الرصيد المتاح من MEXC"""
+    global _balance_checked, _last_balance
+    try:
+        bal = await get_balance(api_key, api_secret)
+        _last_balance = bal["free"]
+        _balance_checked = True
+        return _last_balance
+    except:
+        return 0
+
+
 async def open_trade(signal: dict, user_id: int, amount: float):
-    global _failed_symbols
+    global _failed_symbols, _balance_checked, _last_balance
     api_key = os.getenv("MEXC_API_KEY", "")
     api_secret = os.getenv("MEXC_API_SECRET", "")
     link = tv_link(signal["symbol"])
@@ -117,10 +130,26 @@ async def open_trade(signal: dict, user_id: int, amount: float):
         if symbol not in _failed_symbols:
             _failed_symbols[symbol] = time.time()
             await send_notification(user_id,
-                f"❌ <b>فشل فتح صفقة: مفاتيح API غير موجودة</b>\n\n"
+                f"❌ <b>فشل: مفاتيح API غير موجودة</b>\n\n"
+                f"🪙 {symbol}\n🔗 <a href='{link}'>TradingView</a>"
+            )
+        return
+
+    # فحص الرصيد أولاً
+    balance = await check_balance(api_key, api_secret)
+
+    if balance < amount:
+        now = time.time()
+        last_fail = _failed_symbols.get(symbol, 0)
+        if (now - last_fail) > 900:
+            _failed_symbols[symbol] = now
+            await send_notification(user_id,
+                f"❌ <b>فشل: رصيد غير كافٍ!</b>\n\n"
                 f"🪙 <b>{symbol}</b>\n"
+                f"💰 المبلغ المطلوب: <code>${amount}</code>\n"
+                f"🏦 رصيدك المتاح: <code>${balance:.2f} USDT</code>\n\n"
                 f"🔗 <a href='{link}'>فتح في TradingView</a>\n\n"
-                f"⚠️ السبب: لم يتم إعداد MEXC_API_KEY في الخادم."
+                f"⚠️ الحل: أودع USDT في حساب MEXC."
             )
         return
 
@@ -135,44 +164,35 @@ async def open_trade(signal: dict, user_id: int, amount: float):
         }
         await save_trade(trade)
         logger.info(f"✅ صفقة جديدة: {symbol}")
-        # حذف من قائمة الفشل إذا نجحت
         _failed_symbols.pop(symbol, None)
         await send_notification(user_id,
-            f"✅ <b>تم فتح الصفقة بنجاح!</b>\n\n"
+            f"✅ <b>تم فتح الصفقة!</b>\n\n"
             f"🪙 <b>{symbol}</b>\n"
             f"📥 دخول: <code>{signal['entry_price']}</code>\n"
             f"💵 مبلغ: <code>${amount}</code>\n"
             f"🎯 TP: <code>{signal['take_profit']}</code>\n"
             f"🛑 SL: <code>{signal['stop_loss']}</code>\n\n"
-            f"🔗 <a href='{link}'>مشاهدة على TradingView</a>"
+            f"🔗 <a href='{link}'>TradingView</a>"
         )
     except Exception as e:
-        # إرسال إشعار واحد فقط كل 15 دقيقة لنفس العملة
         now = time.time()
         last_fail = _failed_symbols.get(symbol, 0)
-        if (now - last_fail) > 900:  # 15 دقيقة
+        if (now - last_fail) > 900:
             _failed_symbols[symbol] = now
             error_str = str(e).lower()
-            if any(kw in error_str for kw in ["insufficient", "balance", "margin", "fund"]):
-                reason = "رصيد USDT غير كافٍ في حساب MEXC"
-            elif "minimum" in error_str or "min_qty" in error_str:
+            if "minimum" in error_str or "min_qty" in error_str:
                 reason = "المبلغ أقل من الحد الأدنى للصفقة"
-            elif "api" in error_str or "key" in error_str or "signature" in error_str:
-                reason = "خطأ في مفاتيح API أو التوقيع"
             elif "network" in error_str or "timeout" in error_str:
                 reason = "خطأ في الاتصال بالإنترنت أو MEXC"
-            elif "symbol" in error_str or "not found" in error_str:
-                reason = "رمز العملة غير موجود أو غير مدعوم"
             elif "rate" in error_str or "limit" in error_str:
                 reason = "تم تجاوز حد الطلبات (Rate Limit)"
             else:
-                reason = f"خطأ غير معروف: {str(e)[:150]}"
-
+                reason = f"{str(e)[:150]}"
             await send_notification(user_id,
-                f"❌ <b>فشل فتح صفقة!</b>\n\n"
+                f"❌ <b>فشل تنفيذ الصفقة!</b>\n\n"
                 f"🪙 <b>{symbol}</b>\n"
                 f"💰 مبلغ: <code>${amount}</code>\n"
-                f"🔗 <a href='{link}'>فتح في TradingView</a>\n\n"
+                f"🔗 <a href='{link}'>TradingView</a>\n\n"
                 f"⚠️ <b>السبب:</b> {reason}"
             )
         logger.error(f"فشل فتح صفقة {symbol}: {e}")
@@ -205,18 +225,16 @@ async def close_trade(trade: dict, price: float, reason: str):
             f"📤 خروج: <code>{price:.6f}</code>\n"
             f"{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>\n"
             f"📋 السبب: {reason_text}\n\n"
-            f"🔗 <a href='{link}'>مشاهدة على TradingView</a>",
-            parse_mode="HTML",
-            disable_web_page_preview=True
+            f"🔗 <a href='{link}'>TradingView</a>",
+            parse_mode="HTML", disable_web_page_preview=True
         )
 
 
 async def monitor_loop():
     global _notified_signals, _failed_symbols
-    logger.info("📡 نظام التداول الآلي السريع...")
+    logger.info("📡 نظام التداول الآلي...")
     while True:
         try:
-            # تنظيف الإشعارات القديمة كل ساعة
             now = time.time()
             _failed_symbols = {k: v for k, v in _failed_symbols.items() if (now - v) < 3600}
             if len(_notified_signals) > 500:
@@ -225,7 +243,6 @@ async def monitor_loop():
             trades = await get_all_open_trades()
             open_count = len(trades)
 
-            # مراقبة الصفقات المفتوحة
             for t in trades:
                 try:
                     price = await get_ticker_price(t["symbol"])
@@ -238,7 +255,6 @@ async def monitor_loop():
                 except:
                     pass
 
-            # فتح صفقات جديدة
             if open_count < MAX_OPEN_TRADES:
                 users = await get_all_active_users()
                 auto_users = [u for u in users if u.get("auto_trade")]
@@ -252,7 +268,6 @@ async def monitor_loop():
                         if signal:
                             link = tv_link(signal["symbol"])
                             signal_key = f"{signal['symbol']}_{signal['entry_price']:.2f}"
-                            # إشعار واحد فقط لكل إشارة
                             if signal_key not in _notified_signals:
                                 _notified_signals.add(signal_key)
                                 for user in auto_users:
@@ -262,7 +277,7 @@ async def monitor_loop():
                                         f"📥 سعر: <code>{signal['entry_price']}</code>\n"
                                         f"🎯 TP: <code>{signal['take_profit']}</code>\n"
                                         f"🛑 SL: <code>{signal['stop_loss']}</code>\n\n"
-                                        f"🔗 <a href='{link}'>فتح في TradingView</a>"
+                                        f"🔗 <a href='{link}'>TradingView</a>"
                                     )
                             for user in auto_users:
                                 amount = float(user.get("default_amount", 10))
