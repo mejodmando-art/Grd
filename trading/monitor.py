@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from database.client import get_all_open_trades, update_trade, save_trade, get_all_active_users
 from trading.gate_client import (
     get_ticker_price, place_buy_order, place_sell_order,
-    get_klines, get_top_symbols, get_balance, get_top_coins_by_market_cap
+    get_klines, get_top_symbols, get_balance
 )
 from config import *
 
@@ -27,14 +27,11 @@ async def syms():
     global _cache, _last
     if not _cache or time.time()-_last > 600:
         try:
-            raw = await get_top_symbols(TOP_SYMBOLS_COUNT)
-            good = await get_top_coins_by_market_cap(MIN_MARKET_CAP)
-            # تصفية: نأخذ من أعلى 200 حجماً ما هو موجود في قائمة القيمة السوقية
-            _cache = [s for s in raw if s.replace("USDT","") in good or s in ["BTCUSDT","ETHUSDT"]]
+            _cache = await get_top_symbols(TOP_SYMBOLS_COUNT)
             _last = time.time()
-            logger.info(f"قائمة مصفاة: {len(_cache)} عملة")
+            logger.info(f"تم تحديث قائمة {len(_cache)} عملة")
         except Exception as e:
-            logger.error(f"Error fetching symbols: {e}")
+            logger.error(f"Error: {e}")
     return _cache or ["BTCUSDT","ETHUSDT"]
 
 async def analyze(sym):
