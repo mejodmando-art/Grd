@@ -5,8 +5,6 @@ load_dotenv()
 
 # Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-
-# Admin IDs (comma separated)
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 # MEXC API
@@ -20,10 +18,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 # Monitor interval (seconds)
 MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "30"))
 
-# Default leverage (not used in spot mode but kept for compatibility)
+# Default leverage (unused but kept)
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "1"))
 
-# Quick amount presets (not used now but kept)
+# Quick amount presets
 AMOUNT_PRESETS = [10, 25, 50, 100, 200, 500]
 
 # ========== إعدادات التداول الآلي ==========
