@@ -54,12 +54,23 @@ CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at DESC);
 
--- Enable Row Level Security (optional but recommended)
+-- Enable Row Level Security
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE signals ENABLE ROW LEVEL SECURITY;
 
 -- Allow service role full access (used by the bot backend)
-CREATE POLICY "service_role_all" ON users FOR ALL USING (true);
-CREATE POLICY "service_role_all" ON trades FOR ALL USING (true);
-CREATE POLICY "service_role_all" ON signals FOR ALL USING (true);
+-- USING covers SELECT/UPDATE/DELETE row filtering
+-- WITH CHECK covers INSERT/UPDATE row validation
+DROP POLICY IF EXISTS "service_role_all" ON users;
+DROP POLICY IF EXISTS "service_role_all" ON trades;
+DROP POLICY IF EXISTS "service_role_all" ON signals;
+
+CREATE POLICY "service_role_all" ON users
+    FOR ALL USING (true) WITH CHECK (true);
+
+CREATE POLICY "service_role_all" ON trades
+    FOR ALL USING (true) WITH CHECK (true);
+
+CREATE POLICY "service_role_all" ON signals
+    FOR ALL USING (true) WITH CHECK (true);
