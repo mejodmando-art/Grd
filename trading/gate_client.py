@@ -10,10 +10,10 @@ logger = logging.getLogger("GateClient")
 GATE_BASE = "https://api.gateio.ws/api/v4"
 
 
-def _sign(secret: str, method: str, path: str, query: str, body: str, timestamp: str) -> str:
-    """توقيع طلبات Gate.io"""
-    s = f"{method}\n{path}\n{query}\n{body}\n{timestamp}"
-    return hmac.new(secret.encode(), s.encode(), hashlib.sha512).hexdigest()
+def _sign(secret: str, method: str, path: str, query_string: str, body_string: str, timestamp: str) -> str:
+    """توقيع طلبات Gate.io API v4"""
+    s = f"{method}\n{path}\n{query_string}\n{body_string}\n{timestamp}"
+    return hmac.new(secret.encode('utf-8'), s.encode('utf-8'), hashlib.sha512).hexdigest()
 
 
 def _headers(api_key: str, signature: str, timestamp: str) -> dict:
@@ -30,7 +30,11 @@ def _normalize(symbol: str) -> str:
     """BTC/USDT or BTCUSDT -> BTC_USDT"""
     sym = symbol.replace("/", "_").upper()
     if "_" not in sym:
-        sym = sym[:-4] + "_" + sym[-4:]
+        # BTCUSDT -> BTC_USDT
+        if sym.endswith("USDT"):
+            sym = sym[:-4] + "_USDT"
+        else:
+            sym = sym[:-3] + "_" + sym[-3:]
     return sym
 
 
@@ -40,27 +44,32 @@ def _denormalize(symbol: str) -> str:
 
 
 async def _get(session: aiohttp.ClientSession, path: str, params: dict = None):
-    async with session.get(f"{GATE_BASE}{path}", params=params or {}) as r:
-        r.raise_for_status()
-        return await r.json()
+    url = f"{GATE_BASE}{path}"
+    async with session.get(url, params=params or {}) as r:
+        data = await r.json()
+        if r.status >= 400:
+            raise Exception(f"Gate error {r.status}: {data}")
+        return data
 
 
-async def _signed_get(session: aiohttp.ClientSession, api_key: str, secret: str, path: str, params: dict = None):
-    query = "&".join([f"{k}={v}" for k, v in sorted((params or {}).items())])
+async def _signed_request(session: aiohttp.ClientSession, api_key: str, secret: str, method: str, path: str, params: dict = None, body: dict = None):
+    query_string = ""
+    if params:
+        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    
+    body_string = ""
+    if body:
+        body_string = json.dumps(body)
+    
     timestamp = str(int(time.time()))
-    signature = _sign(secret, "GET", path, query, "", timestamp)
+    signature = _sign(secret, method, path, query_string, body_string, timestamp)
     headers = _headers(api_key, signature, timestamp)
-    async with session.get(f"{GATE_BASE}{path}?{query}" if query else f"{GATE_BASE}{path}", headers=headers) as r:
-        r.raise_for_status()
-        return await r.json()
-
-
-async def _signed_post(session: aiohttp.ClientSession, api_key: str, secret: str, path: str, body: dict):
-    body_str = json.dumps(body) if body else ""
-    timestamp = str(int(time.time()))
-    signature = _sign(secret, "POST", path, "", body_str, timestamp)
-    headers = _headers(api_key, signature, timestamp)
-    async with session.post(f"{GATE_BASE}{path}", data=body_str, headers=headers) as r:
+    
+    url = f"{GATE_BASE}{path}"
+    if query_string and method == "GET":
+        url += f"?{query_string}"
+    
+    async with session.request(method, url, params=params if method == "POST" else None, json=body, headers=headers) as r:
         data = await r.json()
         if r.status >= 400:
             raise Exception(f"Gate error {r.status}: {data}")
@@ -68,29 +77,38 @@ async def _signed_post(session: aiohttp.ClientSession, api_key: str, secret: str
 
 
 async def get_ticker_price(symbol: str, api_key: str = "", api_secret: str = "") -> float:
+    """جلب آخر سعر لعملة"""
     sym = _normalize(symbol)
     async with aiohttp.ClientSession() as s:
         data = await _get(s, "/spot/tickers", {"currency_pair": sym})
-    return float(data[0]["last"])
+    if data and len(data) > 0:
+        return float(data[0]["last"])
+    raise Exception(f"لم يتم العثور على {symbol}")
 
 
 async def get_balance(api_key: str, api_secret: str) -> dict:
+    """جلب رصيد USDT"""
     async with aiohttp.ClientSession() as s:
-        data = await _signed_get(s, api_key, api_secret, "/spot/accounts")
+        data = await _signed_request(s, api_key, api_secret, "GET", "/spot/accounts")
+    
     usdt = next((b for b in data if b["currency"] == "USDT"), None)
     if not usdt:
         return {"free": 0.0, "used": 0.0, "total": 0.0}
     free = float(usdt["available"])
-    locked = float(usdt["locked"])
+    locked = float(usdt.get("locked", 0))
     return {"free": free, "used": locked, "total": free + locked}
 
 
 async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amount: float) -> dict:
+    """تنفيذ أمر شراء Spot"""
     sym = _normalize(symbol)
     async with aiohttp.ClientSession() as s:
+        # جلب السعر
         tickers = await _get(s, "/spot/tickers", {"currency_pair": sym})
+        if not tickers:
+            raise Exception(f"لم يتم العثور على {symbol}")
         price = float(tickers[0]["last"])
-
+        
         qty = usdt_amount / price
         body = {
             "currency_pair": sym,
@@ -99,11 +117,12 @@ async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amoun
             "amount": str(round(qty, 6)),
             "time_in_force": "ioc",
         }
-        order = await _signed_post(s, api_key, api_secret, "/spot/orders", body)
-
+        order = await _signed_request(s, api_key, api_secret, "POST", "/spot/orders", body=body)
+    
     filled_qty = float(order.get("filled_amount", qty))
-    filled_price = float(order.get("filled_total", usdt_amount)) / filled_qty if filled_qty else price
-
+    filled_total = float(order.get("filled_total", usdt_amount))
+    filled_price = filled_total / filled_qty if filled_qty else price
+    
     logger.info(f"Gate Buy: {order.get('id')} | {sym} | qty={filled_qty}")
     return {
         "order_id": str(order.get("id", "")),
@@ -116,6 +135,7 @@ async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amoun
 
 
 async def place_sell_order(api_key: str, api_secret: str, symbol: str, quantity: float) -> dict:
+    """تنفيذ أمر بيع Spot"""
     sym = _normalize(symbol)
     async with aiohttp.ClientSession() as s:
         body = {
@@ -125,12 +145,12 @@ async def place_sell_order(api_key: str, api_secret: str, symbol: str, quantity:
             "amount": str(quantity),
             "time_in_force": "ioc",
         }
-        order = await _signed_post(s, api_key, api_secret, "/spot/orders", body)
-
+        order = await _signed_request(s, api_key, api_secret, "POST", "/spot/orders", body=body)
+    
     filled_qty = float(order.get("filled_amount", quantity))
-    quote_qty = float(order.get("filled_total", 0))
-    close_price = quote_qty / filled_qty if filled_qty else 0
-
+    filled_total = float(order.get("filled_total", 0))
+    close_price = filled_total / filled_qty if filled_qty else 0
+    
     logger.info(f"Gate Sell: {order.get('id')} | {sym} | qty={filled_qty}")
     return {
         "order_id": str(order.get("id", "")),
@@ -138,13 +158,13 @@ async def place_sell_order(api_key: str, api_secret: str, symbol: str, quantity:
         "side": "sell",
         "quantity": filled_qty,
         "close_price": round(close_price, 8),
-        "cost": quote_qty,
+        "cost": filled_total,
     }
 
 
 async def get_klines(symbol: str, interval: str = "5m", limit: int = 60) -> list:
+    """جلب بيانات الشموع"""
     sym = _normalize(symbol)
-    # Gate.io يستخدم صيغة مختلفة للفاصل الزمني
     interval_map = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
     gate_interval = interval_map.get(interval, "5m")
     async with aiohttp.ClientSession() as s:
@@ -154,15 +174,16 @@ async def get_klines(symbol: str, interval: str = "5m", limit: int = 60) -> list
             "limit": limit,
         })
     candles = []
-    for k in reversed(data):
-        candles.append({
-            "open_time": int(k[0]),
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-        })
+    for k in data:
+        if len(k) >= 6:
+            candles.append({
+                "open_time": int(float(k[0])),
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5]),
+            })
     return candles
 
 
@@ -184,8 +205,10 @@ async def get_top_symbols(count: int = 300) -> list:
 
 
 async def validate_api_keys(api_key: str, api_secret: str) -> bool:
+    """التحقق من صحة المفاتيح"""
     try:
         await get_balance(api_key, api_secret)
         return True
-    except:
+    except Exception as e:
+        logger.error(f"Gate validation failed: {e}")
         return False
