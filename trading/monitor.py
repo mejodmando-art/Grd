@@ -8,24 +8,20 @@ from database.client import (
     get_all_open_trades, update_trade, save_trade, get_all_active_users
 )
 from trading.mexc_client import (
-    get_ticker_price, place_buy_order, place_sell_order, get_klines, get_top_symbols,
-    get_balance
+    get_ticker_price, place_buy_order, place_sell_order, get_klines, get_top_symbols, get_balance
 )
 from config import (
-    MONITOR_INTERVAL, TOP_SYMBOLS_COUNT, EMA_FAST, EMA_SLOW,
-    TP_PERCENT, SL_PERCENT, MIN_VOLUME_RATIO, KLINE_INTERVAL,
-    KLINE_LIMIT, MAX_OPEN_TRADES
+    MONITOR_INTERVAL, EMA_TOP_SYMBOLS_COUNT, EMA_FAST, EMA_SLOW,
+    EMA_TP_PERCENT, EMA_SL_PERCENT, EMA_MIN_VOLUME_RATIO, EMA_KLINE_INTERVAL,
+    EMA_KLINE_LIMIT, EMA_MAX_OPEN_TRADES, EMA_DEFAULT_AMOUNT
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("EMA")
 _app = None
 _top_symbols_cache = []
 _last_cache_time = 0
-
 _notified_signals = set()
 _failed_symbols = {}
-_balance_checked = False
-_last_balance = 0
 
 def set_app(app):
     global _app
@@ -53,7 +49,7 @@ async def get_symbols_to_scan() -> list:
     now = time.time()
     if not _top_symbols_cache or (now - _last_cache_time) > 600:
         try:
-            _top_symbols_cache = await get_top_symbols(TOP_SYMBOLS_COUNT)
+            _top_symbols_cache = await get_top_symbols(EMA_TOP_SYMBOLS_COUNT)
             _last_cache_time = now
             logger.info(f"تم تحديث قائمة {len(_top_symbols_cache)} عملة")
         except Exception as e:
@@ -63,36 +59,31 @@ async def get_symbols_to_scan() -> list:
 
 async def analyze_symbol(symbol: str) -> dict | None:
     try:
-        klines = await get_klines(symbol, KLINE_INTERVAL, KLINE_LIMIT)
+        klines = await get_klines(symbol, EMA_KLINE_INTERVAL, EMA_KLINE_LIMIT)
         if len(klines) < 25:
             return None
-
         closes = [c["close"] for c in klines]
         volumes = [c["volume"] for c in klines]
-
         ema_fast = calculate_ema(closes, EMA_FAST)
         ema_slow = calculate_ema(closes, EMA_SLOW)
-
         if not ema_fast or not ema_slow:
             return None
-
         prev_fast = ema_fast[-2]
         prev_slow = ema_slow[-2]
         curr_fast = ema_fast[-1]
         curr_slow = ema_slow[-1]
-
         if prev_fast is None or prev_slow is None:
             return None
-
         if prev_fast <= prev_slow and curr_fast > curr_slow:
             avg_vol = sum(volumes[-20:-1]) / 19 if len(volumes) >= 20 else sum(volumes[:-1]) / max(len(volumes)-1, 1)
-            if volumes[-1] >= avg_vol * MIN_VOLUME_RATIO:
+            if volumes[-1] >= avg_vol * EMA_MIN_VOLUME_RATIO:
                 price = closes[-1]
                 return {
                     "symbol": symbol,
                     "entry_price": price,
-                    "take_profit": round(price * (1 + TP_PERCENT/100), 6),
-                    "stop_loss": round(price * (1 - SL_PERCENT/100), 6),
+                    "take_profit": round(price * (1 + EMA_TP_PERCENT/100), 6),
+                    "stop_loss": round(price * (1 - EMA_SL_PERCENT/100), 6),
+                    "strategy": "EMA",
                 }
     except:
         pass
@@ -103,53 +94,27 @@ async def send_notification(user_id: int, message: str):
     if _app:
         try:
             await _app.bot.send_message(chat_id=user_id, text=message, parse_mode="HTML", disable_web_page_preview=True)
-        except Exception as e:
-            logger.warning(f"فشل إرسال إشعار: {e}")
-
-
-async def check_balance(api_key: str, api_secret: str) -> float:
-    """يجلب الرصيد المتاح من MEXC"""
-    global _balance_checked, _last_balance
-    try:
-        bal = await get_balance(api_key, api_secret)
-        _last_balance = bal["free"]
-        _balance_checked = True
-        return _last_balance
-    except:
-        return 0
+        except:
+            pass
 
 
 async def open_trade(signal: dict, user_id: int, amount: float):
-    global _failed_symbols, _balance_checked, _last_balance
+    global _failed_symbols
     api_key = os.getenv("MEXC_API_KEY", "")
     api_secret = os.getenv("MEXC_API_SECRET", "")
     link = tv_link(signal["symbol"])
     symbol = signal["symbol"]
 
     if not api_key or not api_secret:
-        if symbol not in _failed_symbols:
-            _failed_symbols[symbol] = time.time()
-            await send_notification(user_id,
-                f"❌ <b>فشل: مفاتيح API غير موجودة</b>\n\n"
-                f"🪙 {symbol}\n🔗 <a href='{link}'>TradingView</a>"
-            )
         return
 
-    # فحص الرصيد أولاً
-    balance = await check_balance(api_key, api_secret)
-
-    if balance < amount:
+    balance = await get_balance(api_key, api_secret)
+    if balance["free"] < amount:
         now = time.time()
-        last_fail = _failed_symbols.get(symbol, 0)
-        if (now - last_fail) > 900:
+        if (now - _failed_symbols.get(symbol, 0)) > 900:
             _failed_symbols[symbol] = now
             await send_notification(user_id,
-                f"❌ <b>فشل: رصيد غير كافٍ!</b>\n\n"
-                f"🪙 <b>{symbol}</b>\n"
-                f"💰 المبلغ المطلوب: <code>${amount}</code>\n"
-                f"🏦 رصيدك المتاح: <code>${balance:.2f} USDT</code>\n\n"
-                f"🔗 <a href='{link}'>فتح في TradingView</a>\n\n"
-                f"⚠️ الحل: أودع USDT في حساب MEXC."
+                f"[EMA] ❌ <b>رصيد غير كافٍ!</b>\n🪙 {symbol}\n💰 مطلوب: ${amount}\n🏦 متاح: ${balance['free']:.2f}"
             )
         return
 
@@ -160,42 +125,23 @@ async def open_trade(signal: dict, user_id: int, amount: float):
             "side": "buy", "entry_price": result["entry_price"],
             "amount": amount, "quantity": result["quantity"],
             "take_profit": signal["take_profit"], "stop_loss": signal["stop_loss"],
-            "status": "open", "order_id": result["order_id"], "signal_id": "auto",
+            "status": "open", "order_id": result["order_id"],
+            "signal_id": "ema_auto", "strategy": "EMA",
         }
         await save_trade(trade)
-        logger.info(f"✅ صفقة جديدة: {symbol}")
+        logger.info(f"✅ صفقة: {symbol}")
         _failed_symbols.pop(symbol, None)
         await send_notification(user_id,
-            f"✅ <b>تم فتح الصفقة!</b>\n\n"
-            f"🪙 <b>{symbol}</b>\n"
-            f"📥 دخول: <code>{signal['entry_price']}</code>\n"
-            f"💵 مبلغ: <code>${amount}</code>\n"
-            f"🎯 TP: <code>{signal['take_profit']}</code>\n"
-            f"🛑 SL: <code>{signal['stop_loss']}</code>\n\n"
-            f"🔗 <a href='{link}'>TradingView</a>"
+            f"[EMA] ✅ <b>صفقة جديدة!</b>\n🪙 {symbol}\n📥 دخول: <code>{signal['entry_price']}</code>\n💵 مبلغ: ${amount}\n🔗 <a href='{link}'>TradingView</a>"
         )
     except Exception as e:
         now = time.time()
-        last_fail = _failed_symbols.get(symbol, 0)
-        if (now - last_fail) > 900:
+        if (now - _failed_symbols.get(symbol, 0)) > 900:
             _failed_symbols[symbol] = now
-            error_str = str(e).lower()
-            if "minimum" in error_str or "min_qty" in error_str:
-                reason = "المبلغ أقل من الحد الأدنى للصفقة"
-            elif "network" in error_str or "timeout" in error_str:
-                reason = "خطأ في الاتصال بالإنترنت أو MEXC"
-            elif "rate" in error_str or "limit" in error_str:
-                reason = "تم تجاوز حد الطلبات (Rate Limit)"
-            else:
-                reason = f"{str(e)[:150]}"
             await send_notification(user_id,
-                f"❌ <b>فشل تنفيذ الصفقة!</b>\n\n"
-                f"🪙 <b>{symbol}</b>\n"
-                f"💰 مبلغ: <code>${amount}</code>\n"
-                f"🔗 <a href='{link}'>TradingView</a>\n\n"
-                f"⚠️ <b>السبب:</b> {reason}"
+                f"[EMA] ❌ <b>فشل!</b>\n🪙 {symbol}\n⚠️ {str(e)[:150]}\n🔗 <a href='{link}'>TradingView</a>"
             )
-        logger.error(f"فشل فتح صفقة {symbol}: {e}")
+        logger.error(f"فشل: {symbol}: {e}")
 
 
 async def close_trade(trade: dict, price: float, reason: str):
@@ -216,23 +162,17 @@ async def close_trade(trade: dict, price: float, reason: str):
     })
     emoji = "🎯" if reason == "take_profit" else "🛑"
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-    reason_text = "تحقق الهدف ✅" if reason == "take_profit" else "وقف خسارة ❌"
+    reason_text = "هدف ✅" if reason == "take_profit" else "وقف ❌"
     if _app:
         await _app.bot.send_message(trade["user_id"],
-            f"{emoji} <b>إغلاق صفقة</b>\n\n"
-            f"🪙 <b>{trade['symbol']}</b>\n"
-            f"📥 دخول: <code>{trade['entry_price']}</code>\n"
-            f"📤 خروج: <code>{price:.6f}</code>\n"
-            f"{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>\n"
-            f"📋 السبب: {reason_text}\n\n"
-            f"🔗 <a href='{link}'>TradingView</a>",
+            f"[EMA] {emoji} <b>إغلاق</b>\n🪙 {trade['symbol']}\n{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>\n📋 {reason_text}\n🔗 <a href='{link}'>TradingView</a>",
             parse_mode="HTML", disable_web_page_preview=True
         )
 
 
 async def monitor_loop():
     global _notified_signals, _failed_symbols
-    logger.info("📡 نظام التداول الآلي...")
+    logger.info("📡 EMA Monitor started")
     while True:
         try:
             now = time.time()
@@ -241,9 +181,10 @@ async def monitor_loop():
                 _notified_signals.clear()
 
             trades = await get_all_open_trades()
-            open_count = len(trades)
+            ema_trades = [t for t in trades if t.get("strategy") == "EMA"]
+            open_count = len(ema_trades)
 
-            for t in trades:
+            for t in ema_trades:
                 try:
                     price = await get_ticker_price(t["symbol"])
                     tp = float(t.get("take_profit") or 0)
@@ -255,32 +196,27 @@ async def monitor_loop():
                 except:
                     pass
 
-            if open_count < MAX_OPEN_TRADES:
+            if open_count < EMA_MAX_OPEN_TRADES:
                 users = await get_all_active_users()
-                auto_users = [u for u in users if u.get("auto_trade")]
+                auto_users = [u for u in users if u.get("ema_trade", True)]
                 if auto_users:
                     symbols = await get_symbols_to_scan()
-                    open_symbols = [t["symbol"] for t in trades]
+                    open_symbols = [t["symbol"] for t in ema_trades]
                     for sym in symbols:
                         if sym in open_symbols:
                             continue
                         signal = await analyze_symbol(sym)
                         if signal:
                             link = tv_link(signal["symbol"])
-                            signal_key = f"{signal['symbol']}_{signal['entry_price']:.2f}"
+                            signal_key = f"ema_{signal['symbol']}_{signal['entry_price']:.2f}"
                             if signal_key not in _notified_signals:
                                 _notified_signals.add(signal_key)
                                 for user in auto_users:
                                     await send_notification(user["id"],
-                                        f"🚨 <b>إشارة جديدة!</b>\n\n"
-                                        f"🪙 <b>{signal['symbol']}</b>\n"
-                                        f"📥 سعر: <code>{signal['entry_price']}</code>\n"
-                                        f"🎯 TP: <code>{signal['take_profit']}</code>\n"
-                                        f"🛑 SL: <code>{signal['stop_loss']}</code>\n\n"
-                                        f"🔗 <a href='{link}'>TradingView</a>"
+                                        f"[EMA] 🚨 <b>إشارة!</b>\n🪙 {signal['symbol']}\n📥 <code>{signal['entry_price']}</code>\n🔗 <a href='{link}'>TradingView</a>"
                                     )
                             for user in auto_users:
-                                amount = float(user.get("default_amount", 10))
+                                amount = float(user.get("ema_amount", EMA_DEFAULT_AMOUNT))
                                 await open_trade(signal, user["id"], amount)
                             break
         except Exception as e:
