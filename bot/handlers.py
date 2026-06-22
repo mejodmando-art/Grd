@@ -1,17 +1,18 @@
 import logging
 import os
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, ConversationHandler, filters,
 )
 from config import ADMIN_IDS
 from database.client import get_user, create_user, update_user, get_open_trades, get_trade_history
-from trading.mexc_client import get_balance, get_ticker_price
+from trading.mexc_client import get_balance
 
 logger = logging.getLogger(__name__)
 
-AWAIT_DEFAULT_AMOUNT = 0
+AWAIT_EMA_AMOUNT = 0
+AWAIT_HARPOON_AMOUNT = 1
 
 
 async def ensure_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -23,24 +24,27 @@ async def ensure_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dic
 
 
 async def main_menu_keyboard():
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 رصيدي", callback_data="balance"),
          InlineKeyboardButton("📊 صفقاتي", callback_data="my_trades")],
         [InlineKeyboardButton("⚙️ الإعدادات", callback_data="settings")],
+        [InlineKeyboardButton("📈 إحصائيات", callback_data="stats")],
     ])
 
 
-async def settings_keyboard():
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+async def settings_keyboard(user: dict):
+    ema_status = "✅" if user.get("ema_trade", True) else "❌"
+    harpoon_status = "✅" if user.get("harpoon_trade", True) else "❌"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💵 تغيير المبلغ", callback_data="set_amount")],
-        [InlineKeyboardButton("🤖 تشغيل/إيقاف التلقائي", callback_data="toggle_auto")],
+        [InlineKeyboardButton(f"🤖 EMA: {ema_status}", callback_data="toggle_ema")],
+        [InlineKeyboardButton(f"🎯 هاربون: {harpoon_status}", callback_data="toggle_harpoon")],
+        [InlineKeyboardButton("💵 مبلغ EMA", callback_data="set_ema_amount")],
+        [InlineKeyboardButton("💵 مبلغ هاربون", callback_data="set_harpoon_amount")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")],
     ])
 
 
-WELCOME_MSG = "🤖 <b>بوت التداول الآلي Spot</b>\n\nاختر من القائمة:"
+WELCOME_MSG = "🤖 <b>بوت التداول الآلي المتقدم</b>\n\nاختر من القائمة:"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -82,34 +86,61 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if open_trades:
             msg += f"🟢 <b>مفتوحة:</b>\n"
             for t in open_trades:
-                msg += f"• {t['symbol']} | دخول: <code>{t['entry_price']}</code> | ${t['amount']}\n"
+                strategy = t.get("strategy", "EMA")
+                msg += f"• [{strategy}] {t['symbol']} | دخول: <code>{t['entry_price']}</code> | ${t['amount']}\n"
         if history:
             msg += f"\n📜 <b>آخر الصفقات:</b>\n"
             for t in history:
                 pnl = t.get("pnl", 0) or 0
                 emoji = "🟢" if float(pnl) >= 0 else "🔴"
-                msg += f"• {t['symbol']} | {emoji} {float(pnl):+.2f} USDT\n"
+                strategy = t.get("strategy", "EMA")
+                msg += f"• [{strategy}] {t['symbol']} | {emoji} {float(pnl):+.2f} USDT\n"
         await query.edit_message_text(msg, reply_markup=await main_menu_keyboard(), parse_mode="HTML")
 
-    elif data == "settings":
-        status = "✅ مفعّل" if user.get("auto_trade") else "❌ معطّل"
-        msg = f"⚙️ <b>الإعدادات</b>\n\nالمبلغ: <code>${user.get('default_amount', 10)}</code>\nالتلقائي: {status}"
-        await query.edit_message_text(msg, reply_markup=await settings_keyboard(), parse_mode="HTML")
+    elif data == "stats":
+        await query.edit_message_text("📈 <b>الإحصائيات قادمة قريباً...</b>", reply_markup=await main_menu_keyboard(), parse_mode="HTML")
 
-    elif data == "set_amount":
-        context.user_data["state"] = AWAIT_DEFAULT_AMOUNT
+    elif data == "settings":
+        ema_status = "مفعّل ✅" if user.get("ema_trade", True) else "معطّل ❌"
+        harpoon_status = "مفعّل ✅" if user.get("harpoon_trade", True) else "معطّل ❌"
+        msg = f"⚙️ <b>الإعدادات</b>\n\n🤖 EMA: {ema_status}\n🎯 هاربون: {harpoon_status}\n💵 مبلغ EMA: ${user.get('ema_amount', 10)}\n💵 مبلغ هاربون: ${user.get('harpoon_amount', 10)}"
+        await query.edit_message_text(msg, reply_markup=await settings_keyboard(user), parse_mode="HTML")
+
+    elif data == "toggle_ema":
+        new_val = not bool(user.get("ema_trade", True))
+        await update_user(user_id, {"ema_trade": new_val})
+        status = "✅ مفعّل" if new_val else "❌ معطّل"
+        await query.answer(f"استراتيجية EMA: {status}")
+        # تحديث الشاشة
+        user = await get_user(user_id)
+        ema_status = "مفعّل ✅" if user.get("ema_trade", True) else "معطّل ❌"
+        harpoon_status = "مفعّل ✅" if user.get("harpoon_trade", True) else "معطّل ❌"
+        msg = f"⚙️ <b>الإعدادات</b>\n\n🤖 EMA: {ema_status}\n🎯 هاربون: {harpoon_status}\n💵 مبلغ EMA: ${user.get('ema_amount', 10)}\n💵 مبلغ هاربون: ${user.get('harpoon_amount', 10)}"
+        await query.edit_message_text(msg, reply_markup=await settings_keyboard(user), parse_mode="HTML")
+
+    elif data == "toggle_harpoon":
+        new_val = not bool(user.get("harpoon_trade", True))
+        await update_user(user_id, {"harpoon_trade": new_val})
+        status = "✅ مفعّل" if new_val else "❌ معطّل"
+        await query.answer(f"استراتيجية الهاربون: {status}")
+        user = await get_user(user_id)
+        ema_status = "مفعّل ✅" if user.get("ema_trade", True) else "معطّل ❌"
+        harpoon_status = "مفعّل ✅" if user.get("harpoon_trade", True) else "معطّل ❌"
+        msg = f"⚙️ <b>الإعدادات</b>\n\n🤖 EMA: {ema_status}\n🎯 هاربون: {harpoon_status}\n💵 مبلغ EMA: ${user.get('ema_amount', 10)}\n💵 مبلغ هاربون: ${user.get('harpoon_amount', 10)}"
+        await query.edit_message_text(msg, reply_markup=await settings_keyboard(user), parse_mode="HTML")
+
+    elif data == "set_ema_amount":
+        context.user_data["state"] = AWAIT_EMA_AMOUNT
         await query.edit_message_text(
-            f"💵 المبلغ الحالي: <code>${user.get('default_amount', 10)}</code>\n\nأرسل المبلغ الجديد (USDT):",
+            f"💵 المبلغ الحالي لـ EMA: <code>${user.get('ema_amount', 10)}</code>\n\nأرسل المبلغ الجديد (USDT):",
             reply_markup=await main_menu_keyboard(),
             parse_mode="HTML",
         )
 
-    elif data == "toggle_auto":
-        new_val = not bool(user.get("auto_trade", False))
-        await update_user(user_id, {"auto_trade": new_val})
-        status = "✅ مفعّل" if new_val else "❌ معطّل"
+    elif data == "set_harpoon_amount":
+        context.user_data["state"] = AWAIT_HARPOON_AMOUNT
         await query.edit_message_text(
-            f"🤖 التداول التلقائي: <b>{status}</b>",
+            f"💵 المبلغ الحالي للهاربون: <code>${user.get('harpoon_amount', 10)}</code>\n\nأرسل المبلغ الجديد (USDT):",
             reply_markup=await main_menu_keyboard(),
             parse_mode="HTML",
         )
@@ -120,20 +151,36 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    if state == AWAIT_DEFAULT_AMOUNT:
+    if state == AWAIT_EMA_AMOUNT:
         try:
             amount = float(text)
             if amount <= 0:
                 raise ValueError
-            await update_user(user_id, {"default_amount": amount})
+            await update_user(user_id, {"ema_amount": amount})
             context.user_data.pop("state", None)
             await update.message.reply_text(
-                f"✅ تم التحديث إلى <code>${amount}</code>",
+                f"✅ تم تحديث مبلغ EMA إلى <code>${amount}</code>",
                 reply_markup=await main_menu_keyboard(),
                 parse_mode="HTML",
             )
         except ValueError:
             await update.message.reply_text("❌ أرسل رقماً صحيحاً.")
+
+    elif state == AWAIT_HARPOON_AMOUNT:
+        try:
+            amount = float(text)
+            if amount <= 0:
+                raise ValueError
+            await update_user(user_id, {"harpoon_amount": amount})
+            context.user_data.pop("state", None)
+            await update.message.reply_text(
+                f"✅ تم تحديث مبلغ الهاربون إلى <code>${amount}</code>",
+                reply_markup=await main_menu_keyboard(),
+                parse_mode="HTML",
+            )
+        except ValueError:
+            await update.message.reply_text("❌ أرسل رقماً صحيحاً.")
+
     else:
         await update.message.reply_text("استخدم القائمة:", reply_markup=await main_menu_keyboard())
 
