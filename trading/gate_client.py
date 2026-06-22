@@ -7,8 +7,8 @@ def _client():
         'options': {'defaultType': 'spot'},
     })
 
-def _normalize(symbol):
-    return symbol.replace('/', '') if '/' in symbol else symbol[:-4] + '/' + symbol[-4:]
+def _normalize(s):
+    return s[:-4] + '/' + s[-4:] if '/' not in s else s
 
 async def get_ticker_price(s, *a): return _client().fetch_ticker(_normalize(s))['last']
 async def get_balance(ak, sk):
