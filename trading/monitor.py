@@ -20,11 +20,17 @@ logger = logging.getLogger(__name__)
 _app = None
 _top_symbols_cache = []
 _last_cache_time = 0
-_notified_signals = set()  # لتجنب تكرار الإشعارات لنفس الإشارة
+_notified_signals = set()
 
 def set_app(app):
     global _app
     _app = app
+
+
+def tv_link(symbol: str) -> str:
+    """توليد رابط TradingView للعملة"""
+    sym = symbol.replace("/", "").upper()
+    return f"https://www.tradingview.com/chart/?symbol=MEXC:{sym}"
 
 
 def calculate_ema(prices: list, period: int) -> list:
@@ -90,10 +96,9 @@ async def analyze_symbol(symbol: str) -> dict | None:
 
 
 async def send_notification(user_id: int, message: str):
-    """إرسال إشعار للمستخدم"""
     if _app:
         try:
-            await _app.bot.send_message(chat_id=user_id, text=message, parse_mode="HTML")
+            await _app.bot.send_message(chat_id=user_id, text=message, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as e:
             logger.warning(f"فشل إرسال إشعار: {e}")
 
@@ -101,8 +106,15 @@ async def send_notification(user_id: int, message: str):
 async def open_trade(signal: dict, user_id: int, amount: float):
     api_key = os.getenv("MEXC_API_KEY", "")
     api_secret = os.getenv("MEXC_API_SECRET", "")
+    link = tv_link(signal["symbol"])
+
     if not api_key or not api_secret:
-        await send_notification(user_id, "❌ مفاتيح MEXC غير مضبوطة في الخادم.")
+        await send_notification(user_id,
+            f"❌ <b>فشل فتح صفقة: مفاتيح API غير موجودة</b>\n\n"
+            f"🪙 <b>{signal['symbol']}</b>\n"
+            f"🔗 <a href='{link}'>فتح في TradingView</a>\n\n"
+            f"⚠️ السبب: لم يتم إعداد MEXC_API_KEY في الخادم."
+        )
         return
 
     try:
@@ -117,28 +129,38 @@ async def open_trade(signal: dict, user_id: int, amount: float):
         await save_trade(trade)
         logger.info(f"✅ صفقة جديدة: {signal['symbol']}")
         await send_notification(user_id,
-            f"✅ <b>تم فتح الصفقة!</b>\n\n"
-            f"🪙 {signal['symbol']}\n"
+            f"✅ <b>تم فتح الصفقة بنجاح!</b>\n\n"
+            f"🪙 <b>{signal['symbol']}</b>\n"
             f"📥 دخول: <code>{signal['entry_price']}</code>\n"
             f"💵 مبلغ: <code>${amount}</code>\n"
             f"🎯 TP: <code>{signal['take_profit']}</code>\n"
-            f"🛑 SL: <code>{signal['stop_loss']}</code>"
+            f"🛑 SL: <code>{signal['stop_loss']}</code>\n\n"
+            f"🔗 <a href='{link}'>مشاهدة على TradingView</a>"
         )
     except Exception as e:
-        error_msg = str(e).lower()
-        if "insufficient" in error_msg or "balance" in error_msg or "margin" in error_msg:
-            await send_notification(user_id,
-                f"❌ <b>فشل فتح صفقة: رصيد غير كاف!</b>\n\n"
-                f"🪙 {signal['symbol']}\n"
-                f"💰 المبلغ المطلوب: <code>${amount}</code>\n\n"
-                f"يرجى إيداع USDT في حساب MEXC."
-            )
+        error_str = str(e).lower()
+        if any(kw in error_str for kw in ["insufficient", "balance", "margin", "fund"]):
+            reason = "رصيد USDT غير كافٍ في حساب MEXC"
+        elif "minimum" in error_str or "min_qty" in error_str or "minimal" in error_str:
+            reason = "المبلغ أقل من الحد الأدنى للصفقة"
+        elif "api" in error_str or "key" in error_str or "signature" in error_str:
+            reason = "خطأ في مفاتيح API أو التوقيع"
+        elif "network" in error_str or "timeout" in error_str or "connect" in error_str:
+            reason = "خطأ في الاتصال بالإنترنت أو MEXC"
+        elif "symbol" in error_str or "not found" in error_str:
+            reason = "رمز العملة غير موجود أو غير مدعوم"
+        elif "rate" in error_str or "limit" in error_str:
+            reason = "تم تجاوز حد الطلبات (Rate Limit)"
         else:
-            await send_notification(user_id,
-                f"❌ <b>فشل فتح صفقة!</b>\n\n"
-                f"🪙 {signal['symbol']}\n"
-                f"السبب: <code>{str(e)[:200]}</code>"
-            )
+            reason = f"خطأ غير معروف: {str(e)[:150]}"
+
+        await send_notification(user_id,
+            f"❌ <b>فشل فتح صفقة!</b>\n\n"
+            f"🪙 <b>{signal['symbol']}</b>\n"
+            f"💰 مبلغ: <code>${amount}</code>\n"
+            f"🔗 <a href='{link}'>فتح في TradingView</a>\n\n"
+            f"⚠️ <b>السبب:</b> {reason}"
+        )
         logger.error(f"فشل فتح صفقة {signal['symbol']}: {e}")
 
 
@@ -147,6 +169,7 @@ async def close_trade(trade: dict, price: float, reason: str):
     api_secret = os.getenv("MEXC_API_SECRET", "")
     if not api_key or not api_secret:
         return
+    link = tv_link(trade["symbol"])
     try:
         result = await place_sell_order(api_key, api_secret, trade["symbol"], trade["quantity"])
         price = result.get("close_price", price)
@@ -159,14 +182,18 @@ async def close_trade(trade: dict, price: float, reason: str):
     })
     emoji = "🎯" if reason == "take_profit" else "🛑"
     pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+    reason_text = "تحقق الهدف ✅" if reason == "take_profit" else "وقف خسارة ❌"
     if _app:
         await _app.bot.send_message(trade["user_id"],
             f"{emoji} <b>إغلاق صفقة</b>\n\n"
-            f"🪙 {trade['symbol']}\n"
+            f"🪙 <b>{trade['symbol']}</b>\n"
             f"📥 دخول: <code>{trade['entry_price']}</code>\n"
             f"📤 خروج: <code>{price:.6f}</code>\n"
-            f"{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>",
-            parse_mode="HTML"
+            f"{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>\n"
+            f"📋 السبب: {reason_text}\n\n"
+            f"🔗 <a href='{link}'>مشاهدة على TradingView</a>",
+            parse_mode="HTML",
+            disable_web_page_preview=True
         )
 
 
@@ -202,19 +229,19 @@ async def monitor_loop():
                             continue
                         signal = await analyze_symbol(sym)
                         if signal:
-                            # إرسال إشعار بظهور الإشارة أولاً
+                            link = tv_link(signal["symbol"])
                             signal_key = f"{signal['symbol']}_{signal['entry_price']:.2f}"
                             if signal_key not in _notified_signals:
                                 _notified_signals.add(signal_key)
                                 for user in auto_users:
                                     await send_notification(user["id"],
                                         f"🚨 <b>إشارة جديدة!</b>\n\n"
-                                        f"🪙 {signal['symbol']}\n"
+                                        f"🪙 <b>{signal['symbol']}</b>\n"
                                         f"📥 سعر: <code>{signal['entry_price']}</code>\n"
                                         f"🎯 TP: <code>{signal['take_profit']}</code>\n"
-                                        f"🛑 SL: <code>{signal['stop_loss']}</code>"
+                                        f"🛑 SL: <code>{signal['stop_loss']}</code>\n\n"
+                                        f"🔗 <a href='{link}'>فتح في TradingView</a>"
                                     )
-                            # تنفيذ الصفقة
                             for user in auto_users:
                                 amount = float(user.get("default_amount", 10))
                                 await open_trade(signal, user["id"], amount)
