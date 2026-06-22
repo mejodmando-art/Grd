@@ -1,11 +1,22 @@
 import asyncio
+import logging
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
-import logging
 
 logger = logging.getLogger(__name__)
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+_supabase: Client | None = None
+
+
+def _get_client() -> Client:
+    global _supabase
+    if _supabase is None:
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_KEY environment variables must be set!"
+            )
+        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase
 
 
 async def _run(query):
@@ -16,14 +27,15 @@ async def _run(query):
 # ─── SETUP ────────────────────────────────────────────────────────────────────
 
 async def init_db():
-    """Create tables if they don't exist via Supabase RPC."""
-    logger.info("Database initialized (tables managed via Supabase dashboard)")
+    """Verify DB connection on startup."""
+    client = _get_client()
+    logger.info("✅ Supabase client initialized successfully")
 
 
 # ─── USERS ────────────────────────────────────────────────────────────────────
 
 async def get_user(user_id: int) -> dict | None:
-    res = await _run(supabase.table("users").select("*").eq("id", user_id))
+    res = await _run(_get_client().table("users").select("*").eq("id", user_id))
     return res.data[0] if res.data else None
 
 
@@ -37,30 +49,30 @@ async def create_user(user_id: int, username: str) -> dict:
         "mexc_api_key": "",
         "mexc_api_secret": "",
     }
-    res = await _run(supabase.table("users").upsert(data))
+    res = await _run(_get_client().table("users").upsert(data))
     return res.data[0] if res.data else data
 
 
 async def update_user(user_id: int, updates: dict) -> dict:
-    res = await _run(supabase.table("users").update(updates).eq("id", user_id))
+    res = await _run(_get_client().table("users").update(updates).eq("id", user_id))
     return res.data[0] if res.data else {}
 
 
 async def get_all_active_users() -> list:
-    res = await _run(supabase.table("users").select("*").eq("is_active", True))
+    res = await _run(_get_client().table("users").select("*").eq("is_active", True))
     return res.data or []
 
 
 # ─── SIGNALS ──────────────────────────────────────────────────────────────────
 
 async def save_signal(signal: dict) -> dict:
-    res = await _run(supabase.table("signals").insert(signal))
+    res = await _run(_get_client().table("signals").insert(signal))
     return res.data[0] if res.data else signal
 
 
 async def get_recent_signals(limit: int = 10) -> list:
     res = await _run(
-        supabase.table("signals")
+        _get_client().table("signals")
         .select("*")
         .order("created_at", desc=True)
         .limit(limit)
@@ -71,13 +83,13 @@ async def get_recent_signals(limit: int = 10) -> list:
 # ─── TRADES ───────────────────────────────────────────────────────────────────
 
 async def save_trade(trade: dict) -> dict:
-    res = await _run(supabase.table("trades").insert(trade))
+    res = await _run(_get_client().table("trades").insert(trade))
     return res.data[0] if res.data else trade
 
 
 async def get_open_trades(user_id: int) -> list:
     res = await _run(
-        supabase.table("trades")
+        _get_client().table("trades")
         .select("*")
         .eq("user_id", user_id)
         .eq("status", "open")
@@ -86,13 +98,13 @@ async def get_open_trades(user_id: int) -> list:
 
 
 async def get_all_open_trades() -> list:
-    res = await _run(supabase.table("trades").select("*").eq("status", "open"))
+    res = await _run(_get_client().table("trades").select("*").eq("status", "open"))
     return res.data or []
 
 
 async def get_trade_history(user_id: int, limit: int = 10) -> list:
     res = await _run(
-        supabase.table("trades")
+        _get_client().table("trades")
         .select("*")
         .eq("user_id", user_id)
         .neq("status", "open")
@@ -103,10 +115,10 @@ async def get_trade_history(user_id: int, limit: int = 10) -> list:
 
 
 async def update_trade(trade_id: str, updates: dict) -> dict:
-    res = await _run(supabase.table("trades").update(updates).eq("id", trade_id))
+    res = await _run(_get_client().table("trades").update(updates).eq("id", trade_id))
     return res.data[0] if res.data else {}
 
 
 async def get_trade_by_id(trade_id: str) -> dict | None:
-    res = await _run(supabase.table("trades").select("*").eq("id", trade_id))
+    res = await _run(_get_client().table("trades").select("*").eq("id", trade_id))
     return res.data[0] if res.data else None
