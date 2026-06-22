@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _app = None
 _top_symbols_cache = []
 _last_cache_time = 0
+_notified_signals = set()  # لتجنب تكرار الإشعارات لنفس الإشارة
 
 def set_app(app):
     global _app
@@ -88,11 +89,22 @@ async def analyze_symbol(symbol: str) -> dict | None:
     return None
 
 
+async def send_notification(user_id: int, message: str):
+    """إرسال إشعار للمستخدم"""
+    if _app:
+        try:
+            await _app.bot.send_message(chat_id=user_id, text=message, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"فشل إرسال إشعار: {e}")
+
+
 async def open_trade(signal: dict, user_id: int, amount: float):
     api_key = os.getenv("MEXC_API_KEY", "")
     api_secret = os.getenv("MEXC_API_SECRET", "")
     if not api_key or not api_secret:
+        await send_notification(user_id, "❌ مفاتيح MEXC غير مضبوطة في الخادم.")
         return
+
     try:
         result = await place_buy_order(api_key, api_secret, signal["symbol"], amount)
         trade = {
@@ -104,9 +116,29 @@ async def open_trade(signal: dict, user_id: int, amount: float):
         }
         await save_trade(trade)
         logger.info(f"✅ صفقة جديدة: {signal['symbol']}")
-        if _app:
-            await _app.bot.send_message(user_id, f"🤖 {signal['symbol']}\nدخول: {signal['entry_price']}\nمبلغ: {amount}$", parse_mode="HTML")
+        await send_notification(user_id,
+            f"✅ <b>تم فتح الصفقة!</b>\n\n"
+            f"🪙 {signal['symbol']}\n"
+            f"📥 دخول: <code>{signal['entry_price']}</code>\n"
+            f"💵 مبلغ: <code>${amount}</code>\n"
+            f"🎯 TP: <code>{signal['take_profit']}</code>\n"
+            f"🛑 SL: <code>{signal['stop_loss']}</code>"
+        )
     except Exception as e:
+        error_msg = str(e).lower()
+        if "insufficient" in error_msg or "balance" in error_msg or "margin" in error_msg:
+            await send_notification(user_id,
+                f"❌ <b>فشل فتح صفقة: رصيد غير كاف!</b>\n\n"
+                f"🪙 {signal['symbol']}\n"
+                f"💰 المبلغ المطلوب: <code>${amount}</code>\n\n"
+                f"يرجى إيداع USDT في حساب MEXC."
+            )
+        else:
+            await send_notification(user_id,
+                f"❌ <b>فشل فتح صفقة!</b>\n\n"
+                f"🪙 {signal['symbol']}\n"
+                f"السبب: <code>{str(e)[:200]}</code>"
+            )
         logger.error(f"فشل فتح صفقة {signal['symbol']}: {e}")
 
 
@@ -126,8 +158,16 @@ async def close_trade(trade: dict, price: float, reason: str):
         "closed_at": datetime.now(timezone.utc).isoformat(), "close_reason": reason,
     })
     emoji = "🎯" if reason == "take_profit" else "🛑"
+    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
     if _app:
-        await _app.bot.send_message(trade["user_id"], f"{emoji} {trade['symbol']} | P&L: {pnl:+.4f} USDT", parse_mode="HTML")
+        await _app.bot.send_message(trade["user_id"],
+            f"{emoji} <b>إغلاق صفقة</b>\n\n"
+            f"🪙 {trade['symbol']}\n"
+            f"📥 دخول: <code>{trade['entry_price']}</code>\n"
+            f"📤 خروج: <code>{price:.6f}</code>\n"
+            f"{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>",
+            parse_mode="HTML"
+        )
 
 
 async def monitor_loop():
@@ -137,6 +177,7 @@ async def monitor_loop():
             trades = await get_all_open_trades()
             open_count = len(trades)
 
+            # مراقبة الصفقات المفتوحة
             for t in trades:
                 try:
                     price = await get_ticker_price(t["symbol"])
@@ -149,6 +190,7 @@ async def monitor_loop():
                 except:
                     pass
 
+            # فتح صفقات جديدة
             if open_count < MAX_OPEN_TRADES:
                 users = await get_all_active_users()
                 auto_users = [u for u in users if u.get("auto_trade")]
@@ -160,6 +202,19 @@ async def monitor_loop():
                             continue
                         signal = await analyze_symbol(sym)
                         if signal:
+                            # إرسال إشعار بظهور الإشارة أولاً
+                            signal_key = f"{signal['symbol']}_{signal['entry_price']:.2f}"
+                            if signal_key not in _notified_signals:
+                                _notified_signals.add(signal_key)
+                                for user in auto_users:
+                                    await send_notification(user["id"],
+                                        f"🚨 <b>إشارة جديدة!</b>\n\n"
+                                        f"🪙 {signal['symbol']}\n"
+                                        f"📥 سعر: <code>{signal['entry_price']}</code>\n"
+                                        f"🎯 TP: <code>{signal['take_profit']}</code>\n"
+                                        f"🛑 SL: <code>{signal['stop_loss']}</code>"
+                                    )
+                            # تنفيذ الصفقة
                             for user in auto_users:
                                 amount = float(user.get("default_amount", 10))
                                 await open_trade(signal, user["id"], amount)
