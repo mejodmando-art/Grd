@@ -1,9 +1,5 @@
 import ccxt
 import os
-import aiohttp
-
-GATE_BASE = "https://api.gateio.ws/api/v4"
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 def _client():
     return ccxt.gate({
@@ -100,38 +96,3 @@ async def get_top_symbols(count=200):
                 continue
     syms.sort(key=lambda x: x['volume'], reverse=True)
     return [s['symbol'] for s in syms[:count]]
-
-# ---------- فلتر القيمة السوقية ----------
-_market_caps_cache = {}
-_market_caps_time = 0
-
-async def get_top_coins_by_market_cap(min_cap: int = 2_000_000_000) -> list:
-    """جلب أعلى 250 عملة من CoinGecko وتصفية حسب القيمة السوقية"""
-    global _market_caps_cache, _market_caps_time
-    import time
-    now = time.time()
-    if _market_caps_cache and (now - _market_caps_time) < 3600:
-        return [c for c, cap in _market_caps_cache.items() if cap >= min_cap]
-    try:
-        async with aiohttp.ClientSession() as s:
-            url = f"{COINGECKO_BASE}/coins/markets"
-            params = {
-                'vs_currency': 'usd',
-                'order': 'market_cap_desc',
-                'per_page': 250,
-                'page': 1,
-                'sparkline': 'false'
-            }
-            resp = await s.get(url, params=params)
-            data = await resp.json()
-            for coin in data:
-                symbol = coin.get('symbol', '').upper()
-                market_cap = coin.get('market_cap', 0)
-                if market_cap:
-                    _market_caps_cache[symbol] = market_cap
-            _market_caps_time = now
-            return [c for c, cap in _market_caps_cache.items() if cap >= min_cap]
-    except Exception as e:
-        logger = logging.getLogger("GateClient")
-        logger.error(f"CoinGecko fetch failed: {e}")
-        return list(_market_caps_cache.keys()) if _market_caps_cache else []
