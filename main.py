@@ -30,13 +30,13 @@ async def main():
     register_handlers(app)
     set_app(app)
 
-    # Start monitor loop in background
-    loop = asyncio.get_event_loop()
-    loop.create_task(monitor_loop())
-
     logger.info("✅ Bot started. Polling...")
     await app.initialize()
     await app.start()
+
+    # Start monitor loop in background AFTER app is initialized
+    asyncio.create_task(monitor_loop())
+
     await app.updater.start_polling(drop_pending_updates=True)
 
     # Run until interrupted
