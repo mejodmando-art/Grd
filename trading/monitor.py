@@ -24,7 +24,6 @@ def set_app(app):
 
 
 def calculate_ema(prices: list, period: int) -> list:
-    """حساب المتوسط المتحرك الأسي"""
     if len(prices) < period:
         return []
     k = 2 / (period + 1)
@@ -38,7 +37,6 @@ def calculate_ema(prices: list, period: int) -> list:
 
 
 async def analyze_symbol(symbol: str) -> dict | None:
-    """تحليل عملة واحدة وإرجاع إشارة إن وجدت"""
     try:
         klines = await get_klines(symbol, "15m", 60)
         if len(klines) < 30:
@@ -53,18 +51,15 @@ async def analyze_symbol(symbol: str) -> dict | None:
         if not ema_fast or not ema_slow:
             return None
 
-        # آخر شمعتين للكشف عن التقاطع
         prev_fast = ema_fast[-2]
         prev_slow = ema_slow[-2]
         curr_fast = ema_fast[-1]
         curr_slow = ema_slow[-1]
 
-        # تقاطع إيجابي (Golden Cross)
         if prev_fast is None or prev_slow is None:
             return None
 
         if prev_fast <= prev_slow and curr_fast > curr_slow:
-            # تأكيد بالحجم
             avg_vol = sum(volumes[:-1]) / max(len(volumes) - 1, 1)
             if volumes[-1] >= avg_vol * MIN_VOLUME_RATIO:
                 current_price = closes[-1]
@@ -77,18 +72,14 @@ async def analyze_symbol(symbol: str) -> dict | None:
                     "stop_loss": sl,
                     "signal_type": "ema_crossover",
                 }
-
     except Exception as e:
         logger.error(f"Error analyzing {symbol}: {e}")
-
     return None
 
 
 async def open_auto_trade(signal: dict, user_id: int, amount: float):
-    """فتح صفقة تلقائية"""
     api_key = os.getenv("MEXC_API_KEY", "")
     api_secret = os.getenv("MEXC_API_SECRET", "")
-
     if not api_key or not api_secret:
         logger.error("MEXC API keys not configured")
         return
@@ -129,16 +120,13 @@ async def open_auto_trade(signal: dict, user_id: int, amount: float):
                 await _app.bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
             except:
                 pass
-
     except Exception as e:
         logger.error(f"Failed to open auto trade for {signal['symbol']}: {e}")
 
 
 async def close_trade_on_exchange(trade: dict, close_price: float, reason: str) -> dict:
-    """إغلاق صفقة على المنصة وتحديث قاعدة البيانات"""
     api_key = os.getenv("MEXC_API_KEY", "")
     api_secret = os.getenv("MEXC_API_SECRET", "")
-
     if not api_key or not api_secret:
         return {}
 
@@ -169,7 +157,6 @@ async def close_trade_on_exchange(trade: dict, close_price: float, reason: str) 
 
 
 async def notify_user(user_id: int, message: str):
-    """إرسال إشعار للمستخدم"""
     if _app is None:
         return
     try:
@@ -179,10 +166,8 @@ async def notify_user(user_id: int, message: str):
 
 
 async def monitor_loop():
-    """الحلقة الرئيسية – تحليل السوق ومراقبة الصفقات"""
     logger.info("📡 بدء نظام التداول الآلي...")
 
-    # معرفة المستخدمين النشطين (يفضل الأدمن)
     admin_id = None
     users = await get_all_active_users()
     if users:
@@ -193,7 +178,7 @@ async def monitor_loop():
 
     while True:
         try:
-            # === الجزء الأول: مراقبة الصفقات المفتوحة ===
+            # مراقبة الصفقات المفتوحة
             trades = await get_all_open_trades()
             for trade in trades:
                 try:
@@ -230,27 +215,24 @@ async def monitor_loop():
                 except Exception as e:
                     logger.error(f"Error monitoring trade {trade.get('id')}: {e}")
 
-            # === الجزء الثاني: تحليل السوق وفتح صفقات جديدة ===
+            # فتح صفقات جديدة
             if admin_id:
-                # التحقق من وجود مستخدمين بالتداول التلقائي مفعّل
                 active_auto_users = []
                 for u in await get_all_active_users():
                     if u.get("auto_trade"):
                         active_auto_users.append(u)
 
                 if active_auto_users:
-                    # فحص جميع العملات
                     open_symbols = [t["symbol"] for t in trades]
                     for symbol in SYMBOLS:
                         if symbol in open_symbols:
-                            continue  # تخطي العملات المفتوح عليها صفقات
-
+                            continue
                         signal = await analyze_symbol(symbol)
                         if signal:
                             for user in active_auto_users:
                                 amount = float(user.get("default_amount", 10))
                                 await open_auto_trade(signal, user["id"], amount)
-                            break  # فتح صفقة واحدة فقط في كل دورة
+                            break
 
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")
