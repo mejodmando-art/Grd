@@ -1,9 +1,8 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from trading.gate_client import get_balance
 from database.client import get_user, create_user, update_user, get_open_trades, get_trade_history
 
-# ---------- الكيبوردات ----------
 async def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 رصيدي", callback_data="balance"),
@@ -19,7 +18,6 @@ async def settings_menu(user):
         [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")],
     ])
 
-# ---------- الأوامر ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     u = await get_user(user.id)
@@ -56,8 +54,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(msg, reply_markup=await main_menu(), parse_mode="HTML")
 
     elif d == "settings":
+        # استخدام 10 كقيمة افتراضية مباشرة بدون استيراد
+        amt = u.get('ema_amount', 10)
+        status = '✅' if u.get('ema_trade', True) else '❌'
         await q.edit_message_text(
-            f"⚙️ الإعدادات\n\nالمبلغ: ${u.get('ema_amount', DEFAULT_AMOUNT)}\nالتلقائي: {'✅' if u.get('ema_trade', True) else '❌'}",
+            f"⚙️ الإعدادات\n\nالمبلغ: ${amt}\nالتلقائي: {status}",
             reply_markup=await settings_menu(u)
         )
 
@@ -88,5 +89,4 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def register_handlers(app: Application):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    from telegram.ext import MessageHandler, filters
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
