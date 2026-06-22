@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from database.client import (
@@ -37,7 +38,6 @@ def calculate_ema(prices: list, period: int) -> list:
 
 
 async def get_symbols_to_scan() -> list:
-    """يجلب قائمة العملات مع تحديث كل 10 دقائق"""
     global _top_symbols_cache, _last_cache_time
     now = time.time()
     if not _top_symbols_cache or (now - _last_cache_time) > 600:
@@ -51,7 +51,6 @@ async def get_symbols_to_scan() -> list:
 
 
 async def analyze_symbol(symbol: str) -> dict | None:
-    """تحليل سريع لعملة واحدة"""
     try:
         klines = await get_klines(symbol, KLINE_INTERVAL, KLINE_LIMIT)
         if len(klines) < 25:
@@ -66,7 +65,6 @@ async def analyze_symbol(symbol: str) -> dict | None:
         if not ema_fast or not ema_slow:
             return None
 
-        # التقاطع الذهبي (Golden Cross)
         prev_fast = ema_fast[-2]
         prev_slow = ema_slow[-2]
         curr_fast = ema_fast[-1]
@@ -139,7 +137,6 @@ async def monitor_loop():
             trades = await get_all_open_trades()
             open_count = len(trades)
 
-            # مراقبة الصفقات المفتوحة
             for t in trades:
                 try:
                     price = await get_ticker_price(t["symbol"])
@@ -152,7 +149,6 @@ async def monitor_loop():
                 except:
                     pass
 
-            # فتح صفقات جديدة (إذا لم نصل للحد الأقصى)
             if open_count < MAX_OPEN_TRADES:
                 users = await get_all_active_users()
                 auto_users = [u for u in users if u.get("auto_trade")]
