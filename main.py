@@ -6,8 +6,7 @@ from telegram.ext import Application
 
 from config import TELEGRAM_TOKEN
 from bot.handlers import register_handlers
-from trading.monitor import monitor_loop, set_app as set_ema_app
-from trading.harpoon_monitor import harpoon_loop, set_app as set_harpoon_app
+from trading.monitor import monitor_loop, set_app
 from database.client import init_db
 
 logging.basicConfig(
@@ -23,22 +22,19 @@ async def main():
         logger.error("TELEGRAM_TOKEN is not set!")
         sys.exit(1)
 
-    logger.info("🚀 Starting advanced trading bot...")
+    logger.info("🚀 Starting trading bot (Gate.io)...")
 
     await init_db()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     register_handlers(app)
-    set_ema_app(app)
-    set_harpoon_app(app)
+    set_app(app)
 
     logger.info("✅ Bot started. Polling...")
     await app.initialize()
     await app.start()
 
-    # تشغيل المراقبتين في الخلفية
     asyncio.create_task(monitor_loop())
-    asyncio.create_task(harpoon_loop())
 
     await app.updater.start_polling(drop_pending_updates=True)
 
