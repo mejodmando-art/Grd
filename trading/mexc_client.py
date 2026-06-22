@@ -72,7 +72,6 @@ async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amoun
     async with aiohttp.ClientSession() as s:
         ticker = await _get(s, "/api/v3/ticker/price", {"symbol": sym})
         price = float(ticker["price"])
-
         info = await _get(s, "/api/v3/exchangeInfo", {"symbol": sym})
         filters = info["symbols"][0].get("filters", []) if info.get("symbols") else []
         step = 0.000001
@@ -81,24 +80,19 @@ async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amoun
             if f.get("filterType") == "LOT_SIZE":
                 step = float(f.get("stepSize", step))
                 min_qty = float(f.get("minQty", min_qty))
-
         qty = usdt_amount / price
         precision = len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 0
         qty = round(qty - (qty % step), precision)
-
         if qty < min_qty:
             raise ValueError(f"المبلغ صغير جداً. الحد الأدنى: {min_qty * price:.2f} USDT")
-
         order = await _signed_post(s, api_key, api_secret, "/api/v3/order", {
             "symbol": sym,
             "side": "BUY",
             "type": "MARKET",
             "quantity": str(qty),
         })
-
     filled_qty = float(order.get("executedQty", qty))
     filled_price = float(order.get("cummulativeQuoteQty", usdt_amount)) / filled_qty if filled_qty else price
-
     logger.info(f"Buy order placed: {order.get('orderId')} | {sym} | qty={filled_qty}")
     return {
         "order_id": str(order.get("orderId", "")),
@@ -119,11 +113,9 @@ async def place_sell_order(api_key: str, api_secret: str, symbol: str, quantity:
             "type": "MARKET",
             "quantity": str(quantity),
         })
-
     filled_qty = float(order.get("executedQty", quantity))
     quote_qty = float(order.get("cummulativeQuoteQty", 0))
     close_price = quote_qty / filled_qty if filled_qty else 0
-
     logger.info(f"Sell order placed: {order.get('orderId')} | {sym} | qty={filled_qty}")
     return {
         "order_id": str(order.get("orderId", "")),
