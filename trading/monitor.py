@@ -1,42 +1,161 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 
-from database.client import get_all_open_trades, update_trade, get_user
-from trading.mexc_client import get_ticker_price, place_sell_order
-from config import MONITOR_INTERVAL
+from database.client import (
+    get_all_open_trades, update_trade, save_trade, get_user, get_all_active_users
+)
+from trading.mexc_client import (
+    get_ticker_price, place_buy_order, place_sell_order, get_klines
+)
+from config import (
+    MONITOR_INTERVAL, SYMBOLS, EMA_FAST, EMA_SLOW,
+    TP_PERCENT, SL_PERCENT, MIN_VOLUME_RATIO
+)
 
 logger = logging.getLogger(__name__)
 
-# Global application reference (set from main.py)
 _app = None
-
 
 def set_app(app):
     global _app
     _app = app
 
 
+def calculate_ema(prices: list, period: int) -> list:
+    """حساب المتوسط المتحرك الأسي"""
+    if len(prices) < period:
+        return []
+    k = 2 / (period + 1)
+    ema_values = []
+    sma = sum(prices[:period]) / period
+    ema_values.append(sma)
+    for price in prices[period:]:
+        ema = price * k + ema_values[-1] * (1 - k)
+        ema_values.append(ema)
+    return [None] * (period - 1) + ema_values
+
+
+async def analyze_symbol(symbol: str) -> dict | None:
+    """تحليل عملة واحدة وإرجاع إشارة إن وجدت"""
+    try:
+        klines = await get_klines(symbol, "15m", 60)
+        if len(klines) < 30:
+            return None
+
+        closes = [c["close"] for c in klines]
+        volumes = [c["volume"] for c in klines]
+
+        ema_fast = calculate_ema(closes, EMA_FAST)
+        ema_slow = calculate_ema(closes, EMA_SLOW)
+
+        if not ema_fast or not ema_slow:
+            return None
+
+        # آخر شمعتين للكشف عن التقاطع
+        prev_fast = ema_fast[-2]
+        prev_slow = ema_slow[-2]
+        curr_fast = ema_fast[-1]
+        curr_slow = ema_slow[-1]
+
+        # تقاطع إيجابي (Golden Cross)
+        if prev_fast is None or prev_slow is None:
+            return None
+
+        if prev_fast <= prev_slow and curr_fast > curr_slow:
+            # تأكيد بالحجم
+            avg_vol = sum(volumes[:-1]) / max(len(volumes) - 1, 1)
+            if volumes[-1] >= avg_vol * MIN_VOLUME_RATIO:
+                current_price = closes[-1]
+                tp = round(current_price * (1 + TP_PERCENT / 100), 6)
+                sl = round(current_price * (1 - SL_PERCENT / 100), 6)
+                return {
+                    "symbol": symbol,
+                    "entry_price": current_price,
+                    "take_profit": tp,
+                    "stop_loss": sl,
+                    "signal_type": "ema_crossover",
+                }
+
+    except Exception as e:
+        logger.error(f"Error analyzing {symbol}: {e}")
+
+    return None
+
+
+async def open_auto_trade(signal: dict, user_id: int, amount: float):
+    """فتح صفقة تلقائية"""
+    api_key = os.getenv("MEXC_API_KEY", "")
+    api_secret = os.getenv("MEXC_API_SECRET", "")
+
+    if not api_key or not api_secret:
+        logger.error("MEXC API keys not configured")
+        return
+
+    try:
+        result = await place_buy_order(
+            api_key=api_key,
+            api_secret=api_secret,
+            symbol=signal["symbol"],
+            usdt_amount=amount,
+        )
+        trade = {
+            "user_id": user_id,
+            "symbol": signal["symbol"],
+            "side": "buy",
+            "entry_price": result["entry_price"],
+            "amount": amount,
+            "quantity": result["quantity"],
+            "take_profit": signal["take_profit"],
+            "stop_loss": signal["stop_loss"],
+            "status": "open",
+            "order_id": result["order_id"],
+            "signal_id": "auto",
+        }
+        saved = await save_trade(trade)
+        logger.info(f"Auto trade opened: {signal['symbol']} @ {signal['entry_price']}")
+
+        if _app:
+            msg = (
+                f"🤖 <b>صفقة تلقائية جديدة!</b>\n\n"
+                f"🪙 <b>العملة:</b> {signal['symbol']}\n"
+                f"📥 <b>الدخول:</b> <code>{signal['entry_price']}</code>\n"
+                f"💵 <b>المبلغ:</b> <code>${amount}</code>\n"
+                f"🎯 <b>TP:</b> <code>{signal['take_profit']}</code>\n"
+                f"🛑 <b>SL:</b> <code>{signal['stop_loss']}</code>"
+            )
+            try:
+                await _app.bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
+            except:
+                pass
+
+    except Exception as e:
+        logger.error(f"Failed to open auto trade for {signal['symbol']}: {e}")
+
+
 async def close_trade_on_exchange(trade: dict, close_price: float, reason: str) -> dict:
-    """Close a trade on the exchange and update DB."""
-    user = await get_user(trade["user_id"])
-    if not user or not user.get("mexc_api_key"):
+    """إغلاق صفقة على المنصة وتحديث قاعدة البيانات"""
+    api_key = os.getenv("MEXC_API_KEY", "")
+    api_secret = os.getenv("MEXC_API_SECRET", "")
+
+    if not api_key or not api_secret:
         return {}
 
     try:
         result = await place_sell_order(
-            api_key=user["mexc_api_key"],
-            api_secret=user["mexc_api_secret"],
+            api_key=api_key,
+            api_secret=api_secret,
             symbol=trade["symbol"],
             quantity=trade["quantity"],
         )
         close_price = result.get("close_price", close_price)
     except Exception as e:
-        logger.error(f"Failed to close trade {trade['id']} on exchange: {e}")
+        logger.error(f"Failed to close trade on exchange: {e}")
 
     entry = float(trade["entry_price"])
     qty = float(trade["quantity"])
-    pnl = (close_price - entry) * qty if trade["side"] == "buy" else (entry - close_price) * qty
+    pnl = (close_price - entry) * qty
 
     updates = {
         "status": "closed",
@@ -50,7 +169,7 @@ async def close_trade_on_exchange(trade: dict, close_price: float, reason: str) 
 
 
 async def notify_user(user_id: int, message: str):
-    """Send notification to a Telegram user."""
+    """إرسال إشعار للمستخدم"""
     if _app is None:
         return
     try:
@@ -60,51 +179,78 @@ async def notify_user(user_id: int, message: str):
 
 
 async def monitor_loop():
-    """Main monitoring loop – checks all open trades every MONITOR_INTERVAL seconds."""
-    logger.info("📡 Monitor loop started")
+    """الحلقة الرئيسية – تحليل السوق ومراقبة الصفقات"""
+    logger.info("📡 بدء نظام التداول الآلي...")
+
+    # معرفة المستخدمين النشطين (يفضل الأدمن)
+    admin_id = None
+    users = await get_all_active_users()
+    if users:
+        admin_id = users[0]["id"]
+
+    if not admin_id:
+        logger.warning("لا يوجد مستخدمين نشطين، التداول الآلي متوقف مؤقتاً")
+
     while True:
         try:
+            # === الجزء الأول: مراقبة الصفقات المفتوحة ===
             trades = await get_all_open_trades()
-            if trades:
-                logger.debug(f"Monitoring {len(trades)} open trade(s)")
-
             for trade in trades:
                 try:
                     current_price = await get_ticker_price(trade["symbol"])
                     tp = float(trade.get("take_profit") or 0)
                     sl = float(trade.get("stop_loss") or 0)
-                    side = trade.get("side", "buy")
 
-                    hit_tp = tp > 0 and (
-                        (side == "buy" and current_price >= tp) or
-                        (side == "sell" and current_price <= tp)
-                    )
-                    hit_sl = sl > 0 and (
-                        (side == "buy" and current_price <= sl) or
-                        (side == "sell" and current_price >= sl)
-                    )
-
-                    if hit_tp or hit_sl:
-                        reason = "take_profit" if hit_tp else "stop_loss"
-                        emoji = "🎯" if hit_tp else "🛑"
-                        label = "Take Profit ✅" if hit_tp else "Stop Loss ❌"
-
-                        closed = await close_trade_on_exchange(trade, current_price, reason)
+                    if tp > 0 and current_price >= tp:
+                        closed = await close_trade_on_exchange(trade, current_price, "take_profit")
                         pnl = closed.get("pnl", 0)
                         pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-
                         msg = (
-                            f"{emoji} <b>{label} تم!</b>\n\n"
-                            f"🪙 <b>العملة:</b> {trade['symbol']}\n"
-                            f"📥 <b>سعر الدخول:</b> <code>{trade['entry_price']}</code>\n"
-                            f"📤 <b>سعر الخروج:</b> <code>{current_price:.6f}</code>\n"
-                            f"{pnl_emoji} <b>الربح/الخسارة:</b> <code>{pnl:+.4f} USDT</code>\n"
-                            f"⏰ <b>الوقت:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            f"🎯 <b>تحقق الهدف!</b>\n\n"
+                            f"🪙 {trade['symbol']}\n"
+                            f"📥 دخول: <code>{trade['entry_price']}</code>\n"
+                            f"📤 خروج: <code>{current_price:.6f}</code>\n"
+                            f"{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>"
+                        )
+                        await notify_user(trade["user_id"], msg)
+
+                    elif sl > 0 and current_price <= sl:
+                        closed = await close_trade_on_exchange(trade, current_price, "stop_loss")
+                        pnl = closed.get("pnl", 0)
+                        pnl_emoji = "🔴"
+                        msg = (
+                            f"🛑 <b>وقف خسارة!</b>\n\n"
+                            f"🪙 {trade['symbol']}\n"
+                            f"📥 دخول: <code>{trade['entry_price']}</code>\n"
+                            f"📤 خروج: <code>{current_price:.6f}</code>\n"
+                            f"{pnl_emoji} P&L: <code>{pnl:+.4f} USDT</code>"
                         )
                         await notify_user(trade["user_id"], msg)
 
                 except Exception as e:
                     logger.error(f"Error monitoring trade {trade.get('id')}: {e}")
+
+            # === الجزء الثاني: تحليل السوق وفتح صفقات جديدة ===
+            if admin_id:
+                # التحقق من وجود مستخدمين بالتداول التلقائي مفعّل
+                active_auto_users = []
+                for u in await get_all_active_users():
+                    if u.get("auto_trade"):
+                        active_auto_users.append(u)
+
+                if active_auto_users:
+                    # فحص جميع العملات
+                    open_symbols = [t["symbol"] for t in trades]
+                    for symbol in SYMBOLS:
+                        if symbol in open_symbols:
+                            continue  # تخطي العملات المفتوح عليها صفقات
+
+                        signal = await analyze_symbol(symbol)
+                        if signal:
+                            for user in active_auto_users:
+                                amount = float(user.get("default_amount", 10))
+                                await open_auto_trade(signal, user["id"], amount)
+                            break  # فتح صفقة واحدة فقط في كل دورة
 
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")
