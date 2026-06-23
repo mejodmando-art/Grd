@@ -11,7 +11,7 @@ logger = logging.getLogger("GateBot")
 _app = None
 _cache = []
 _last = 0
-notified_signals = set()   # منع تكرار الإشعارات
+notified_signals = set()
 
 def set_app(a): global _app; _app = a
 
@@ -95,7 +95,6 @@ async def monitor_loop():
     while True:
         try:
             trades = await get_all_open_trades()
-            # مراقبة الصفقات المفتوحة
             for t in trades:
                 try:
                     p = await get_ticker_price(t["symbol"])
@@ -104,8 +103,6 @@ async def monitor_loop():
                     if tp and p >= tp: await close_trade(t, p, "take_profit")
                     elif sl and p <= sl: await close_trade(t, p, "stop_loss")
                 except: pass
-
-            # فتح صفقات جديدة
             if len(trades) < MAX_OPEN_TRADES:
                 users = await get_all_active_users()
                 auto_users = [u for u in users if u.get("ema_trade", True)]
@@ -116,7 +113,6 @@ async def monitor_loop():
                         if sym in open_symbols: continue
                         signal = await analyze(sym)
                         if signal:
-                            # منع تكرار الإشعار لنفس العملة
                             signal_key = f"{signal['symbol']}_{signal['entry_price']:.2f}"
                             if signal_key not in notified_signals:
                                 notified_signals.add(signal_key)
@@ -130,7 +126,6 @@ async def monitor_loop():
                                 amt = float(user.get("ema_amount", DEFAULT_AMOUNT))
                                 await open_trade(signal, user["id"], amt)
                             break
-            # تنظيف الذاكرة كل ساعة
             if len(notified_signals) > 500: notified_signals.clear()
         except Exception as e: logger.error(f"Monitor error: {e}")
         await asyncio.sleep(MONITOR_INTERVAL)
