@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 async def main():
     if not TELEGRAM_TOKEN: sys.exit(1)
-    logger.info("🚀 Starting Gate.io bot (clean)...")
+    logger.info("🚀 Starting Gate.io bot...")
     await init_db()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     register_handlers(app)
