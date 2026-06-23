@@ -12,23 +12,19 @@ def _get_client() -> Client:
     global _supabase
     if _supabase is None:
         if not SUPABASE_URL or not SUPABASE_KEY:
-            raise RuntimeError(
-                "SUPABASE_URL and SUPABASE_KEY environment variables must be set!"
-            )
+            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables must be set!")
         _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase
 
 
 async def _run(query):
-    """Run a synchronous Supabase query in a thread so it doesn't block the event loop."""
     return await asyncio.to_thread(query.execute)
 
 
 # ─── SETUP ────────────────────────────────────────────────────────────────────
 
 async def init_db():
-    """Verify DB connection on startup."""
-    client = _get_client()
+    _get_client()
     logger.info("✅ Supabase client initialized successfully")
 
 
@@ -44,10 +40,11 @@ async def create_user(user_id: int, username: str) -> dict:
         "id": user_id,
         "username": username,
         "is_active": True,
-        "auto_trade": False,
-        "default_amount": 10.0,
-        "mexc_api_key": "",
-        "mexc_api_secret": "",
+        "ema_trade": False,
+        "ema_amount": 10.0,
+        "harpoon_trade": False,
+        "harpoon_amount": 10.0,
+        "exchange": "gate",
     }
     res = await _run(_get_client().table("users").upsert(data))
     return res.data[0] if res.data else data
@@ -93,6 +90,7 @@ async def get_open_trades(user_id: int) -> list:
         .select("*")
         .eq("user_id", user_id)
         .eq("status", "open")
+        .order("created_at", desc=True)
     )
     return res.data or []
 
