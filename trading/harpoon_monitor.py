@@ -122,7 +122,7 @@ async def get_symbols_to_scan(exchange: str = "mexc") -> List[str]:
     global _top_symbols_cache, _last_cache_time
     now = time.time()
     if (exchange not in _top_symbols_cache or
-            (now - _last_cache_time.get(exchange, 0)) > 60):  # 1 minute cache
+            (now - _last_cache_time.get(exchange, 0)) > 60):
         try:
             if exchange == "gate":
                 _top_symbols_cache[exchange] = await gate_top(HARPOON_TOP_SYMBOLS_COUNT)
@@ -138,12 +138,15 @@ async def get_symbols_to_scan(exchange: str = "mexc") -> List[str]:
 async def analyze_harpoon(symbol: str, exchange: str = "mexc") -> Optional[Dict]:
     """Analyze symbol for HARPOON signal."""
     try:
+        logger.debug(f"HARPOON: Analyzing {symbol}")
+
         if exchange == "gate":
             klines = await gate_klines(symbol, HARPOON_KLINE_INTERVAL, HARPOON_KLINE_LIMIT)
         else:
             klines = await mexc_klines(symbol, HARPOON_KLINE_INTERVAL, HARPOON_KLINE_LIMIT)
 
         if len(klines) < 30:
+            logger.debug(f"HARPOON: {symbol} - Not enough candles ({len(klines)})")
             return None
 
         closes = [c["close"] for c in klines]
@@ -152,42 +155,58 @@ async def analyze_harpoon(symbol: str, exchange: str = "mexc") -> Optional[Dict]
         ema_fast = calculate_ema(closes, HARPOON_EMA_FAST)
         ema_slow = calculate_ema(closes, HARPOON_EMA_SLOW)
         if not ema_fast or not ema_slow:
+            logger.debug(f"HARPOON: {symbol} - EMA not ready")
             return None
 
         prev_fast, prev_slow = ema_fast[-2], ema_slow[-2]
         curr_fast, curr_slow = ema_fast[-1], ema_slow[-1]
         if prev_fast is None or prev_slow is None:
+            logger.debug(f"HARPOON: {symbol} - EMA values None")
             return None
 
         avg_vol = sum(volumes[-20:-1]) / 19 if len(volumes) >= 20 else sum(volumes[:-1]) / max(len(volumes) - 1, 1)
-        if not (prev_fast <= prev_slow and curr_fast > curr_slow and volumes[-1] >= avg_vol * HARPOON_MIN_VOLUME_RATIO):
+        current_vol = volumes[-1]
+        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
+
+        logger.debug(f"HARPOON: {symbol} - EMA: prev={prev_fast:.6f}/{prev_slow:.6f}, curr={curr_fast:.6f}/{curr_slow:.6f}, vol_ratio={vol_ratio:.2f}")
+
+        if not (prev_fast <= prev_slow and curr_fast > curr_slow and current_vol >= avg_vol * HARPOON_MIN_VOLUME_RATIO):
+            logger.debug(f"HARPOON: {symbol} - No EMA crossover or volume too low")
             return None
+
+        logger.info(f"HARPOON: {symbol} - EMA CROSSOVER! Checking confirmations...")
 
         confirmations = 0
         conf_names = []
 
         # Whale volume confirmation
         recent_high = max(closes[-10:-1])
-        if volumes[-1] >= avg_vol * HARPOON_WHALE_VOLUME_RATIO and closes[-1] > recent_high:
+        if current_vol >= avg_vol * HARPOON_WHALE_VOLUME_RATIO and closes[-1] > recent_high:
             confirmations += 1
             conf_names.append("🐋 Whale")
+            logger.info(f"HARPOON: {symbol} - Whale confirmation!")
 
         # Support + bullish engulfing confirmation
         support = find_support(closes)
         if support and closes[-2] <= support * 1.01 and is_bullish_engulfing(klines):
             confirmations += 1
             conf_names.append("📊 Support")
+            logger.info(f"HARPOON: {symbol} - Support confirmation!")
 
         # RSI + hammer confirmation
         rsi = calculate_rsi(closes)
         if rsi < HARPOON_RSI_OVERSOLD and is_hammer(klines[-1]):
             confirmations += 1
             conf_names.append("🔥 Reversal")
+            logger.info(f"HARPOON: {symbol} - RSI+Hammer confirmation! RSI={rsi:.1f}")
 
         if confirmations == 0:
+            logger.info(f"HARPOON: {symbol} - No confirmations found")
             return None
 
         price = closes[-1]
+        logger.info(f"HARPOON: {symbol} - SIGNAL CONFIRMED! {confirmations} confirmations, Price: {price}")
+
         return {
             "symbol": symbol,
             "entry_price": price,
@@ -198,8 +217,8 @@ async def analyze_harpoon(symbol: str, exchange: str = "mexc") -> Optional[Dict]
             "conf_names": conf_names,
             "rsi": round(rsi, 1),
         }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"HARPOON: {symbol} - Analysis error: {e}")
     return None
 
 
@@ -213,13 +232,15 @@ async def send_notification(user_id: int, message: str):
                 parse_mode="HTML",
                 disable_web_page_preview=True
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"HARPOON: Failed to notify user {user_id}: {e}")
 
 
 async def open_trade(signal: dict, user_id: int, amount: float, exchange: str = "mexc"):
     """Open a trade for a user."""
     global _failed_symbols
+
+    logger.info(f"HARPOON: Attempting to open trade {signal['symbol']} for user {user_id} on {exchange}")
 
     link = tv_link(signal["symbol"], exchange)
     symbol = signal["symbol"]
@@ -237,10 +258,12 @@ async def open_trade(signal: dict, user_id: int, amount: float, exchange: str = 
         buy_func = mexc_buy
 
     if not api_key or not api_secret:
-        logger.warning(f"HARPOON: API keys not found for {exchange}")
+        logger.error(f"HARPOON: API keys not found for {exchange}")
+        await send_notification(user_id, f"❌ <b>API keys missing!</b>\nPlease set {exchange.upper()} API keys.")
         return
 
     try:
+        logger.info(f"HARPOON: Checking balance for user {user_id}")
         balance = await balance_func(api_key, api_secret)
     except Exception as e:
         logger.error(f"HARPOON: Balance check failed for {symbol}: {e}")
@@ -250,6 +273,7 @@ async def open_trade(signal: dict, user_id: int, amount: float, exchange: str = 
         now = time.time()
         if (now - _failed_symbols.get(symbol, 0)) > 900:
             _failed_symbols[symbol] = now
+            logger.warning(f"HARPOON: User {user_id} insufficient balance: {balance['free']} < {amount}")
             await send_notification(user_id,
                 f"[HARPOON-{exchange.upper()}] ❌ <b>Insufficient balance!</b>\n"
                 f"🪙 {symbol}\n"
@@ -259,7 +283,10 @@ async def open_trade(signal: dict, user_id: int, amount: float, exchange: str = 
         return
 
     try:
+        logger.info(f"HARPOON: Placing buy order for {symbol} ${amount}")
         result = await buy_func(api_key, api_secret, symbol, amount)
+        logger.info(f"HARPOON: Buy order result: {result}")
+
         trade = {
             "user_id": user_id,
             "symbol": symbol,
@@ -277,6 +304,7 @@ async def open_trade(signal: dict, user_id: int, amount: float, exchange: str = 
             "exchange": exchange.upper(),
         }
         await save_trade(trade)
+
         logger.info(f"HARPOON: Opened {symbol} ({signal['confirmations']} confirmations) on {exchange}")
         _failed_symbols.pop(symbol, None)
 
@@ -293,12 +321,12 @@ async def open_trade(signal: dict, user_id: int, amount: float, exchange: str = 
         now = time.time()
         if (now - _failed_symbols.get(symbol, 0)) > 900:
             _failed_symbols[symbol] = now
+            logger.error(f"HARPOON: Failed to open trade {symbol}: {e}")
             await send_notification(user_id,
                 f"[HARPOON-{exchange.upper()}] ❌ <b>Failed!</b>\n"
                 f"🪙 {symbol}\n"
                 f"⚠️ {str(e)[:150]}"
             )
-        logger.error(f"HARPOON failed {symbol}: {e}")
 
 
 async def close_trade(trade: dict, price: float, reason: str):
@@ -322,6 +350,7 @@ async def close_trade(trade: dict, price: float, reason: str):
 
     # Try to sell first
     try:
+        logger.info(f"HARPOON: Selling {trade['symbol']} at {price}")
         result = await sell_func(api_key, api_secret, trade["symbol"], trade["quantity"])
         price = result.get("close_price", price)
         logger.info(f"HARPOON: Sold {trade['symbol']} at {price}")
@@ -365,20 +394,23 @@ async def harpoon_loop():
     """Main HARPOON monitoring loop."""
     global _notified_signals, _failed_symbols
     logger.info("🎯 HARPOON Monitor started")
+    cycle_count = 0
 
     while True:
         try:
+            cycle_count += 1
+            logger.info(f"HARPOON: Cycle #{cycle_count}")
+
             now = time.time()
             # Clean old failed symbols
             _failed_symbols = {k: v for k, v in _failed_symbols.items() if (now - v) < 3600}
-
-            # Clean old notified signals
             if len(_notified_signals) > 500:
                 _notified_signals.clear()
 
             # Check existing trades for TP/SL
             trades = await get_all_open_trades()
             harpoon_trades = [t for t in trades if t.get("strategy") == "HARPOON"]
+            logger.info(f"HARPOON: {len(harpoon_trades)} open trades")
 
             for t in harpoon_trades:
                 try:
@@ -391,33 +423,46 @@ async def harpoon_loop():
                     tp = float(t.get("take_profit") or 0)
                     sl = float(t.get("stop_loss") or 0)
 
+                    logger.debug(f"HARPOON: {t['symbol']} price={price} TP={tp} SL={sl}")
+
                     if tp and price >= tp:
+                        logger.info(f"HARPOON: {t['symbol']} hit TP!")
                         await close_trade(t, price, "take_profit")
                     elif sl and price <= sl:
+                        logger.info(f"HARPOON: {t['symbol']} hit SL!")
                         await close_trade(t, price, "stop_loss")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"HARPOON: Error checking trade {t['symbol']}: {e}")
 
             # Open new trades (per user, per exchange)
             users = await get_all_active_users()
-            for user in users:
-                if not user.get("harpoon_trade", False):  # FIXED: default False
-                    continue
+            logger.info(f"HARPOON: {len(users)} total users")
 
+            active_users = [u for u in users if u.get("harpoon_trade", False)]
+            logger.info(f"HARPOON: {len(active_users)} users with HARPOON enabled")
+
+            for user in active_users:
+                user_id = user["id"]
                 exchange = user.get("exchange", "mexc")
                 exchanges_to_trade = ["mexc", "gate"] if exchange == "both" else [exchange]
+
+                logger.info(f"HARPOON: Processing user {user_id}, exchange={exchange}")
 
                 for ex in exchanges_to_trade:
                     # Count user's open trades for this exchange
                     user_ex_trades = [
                         t for t in harpoon_trades
-                        if t.get("user_id") == user["id"] and t.get("exchange", "MEXC").lower() == ex
+                        if t.get("user_id") == user_id and t.get("exchange", "MEXC").lower() == ex
                     ]
                     if len(user_ex_trades) >= HARPOON_MAX_OPEN_TRADES:
+                        logger.info(f"HARPOON: User {user_id} at max trades ({len(user_ex_trades)}) on {ex}")
                         continue
 
                     symbols = await get_symbols_to_scan(ex)
+                    logger.info(f"HARPOON: Checking {len(symbols)} symbols on {ex}")
+
                     user_open_symbols = [t["symbol"] for t in user_ex_trades]
+                    signals_found = 0
 
                     for sym in symbols:
                         if sym in user_open_symbols:
@@ -425,11 +470,13 @@ async def harpoon_loop():
 
                         signal = await analyze_harpoon(sym, ex)
                         if signal:
+                            signals_found += 1
                             link = tv_link(signal["symbol"], ex)
                             signal_key = f"harpoon_{ex}_{signal['symbol']}_{signal['entry_price']:.2f}"
 
                             if signal_key not in _notified_signals:
                                 _notified_signals.add(signal_key)
+                                logger.info(f"HARPOON: New signal for {sym}!")
                                 await send_notification(user["id"],
                                     f"[HARPOON-{ex.upper()}] 🚨 <b>Signal!</b>\n"
                                     f"🪙 {signal['symbol']}\n"
@@ -449,10 +496,15 @@ async def harpoon_loop():
                             else:
                                 amount = base
 
+                            logger.info(f"HARPOON: Opening trade for {sym} with ${amount}")
                             await open_trade(signal, user["id"], amount, ex)
                             break  # One trade per cycle per user per exchange
+
+                    if signals_found == 0:
+                        logger.info(f"HARPOON: No signals found on {ex} for user {user_id}")
 
         except Exception as e:
             logger.error(f"HARPOON error: {e}")
 
+        logger.info(f"HARPOON: Sleeping for {MONITOR_INTERVAL}s")
         await asyncio.sleep(MONITOR_INTERVAL)
