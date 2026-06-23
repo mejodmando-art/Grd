@@ -1,3 +1,4 @@
+import asyncio
 import ccxt
 import os
 
@@ -13,8 +14,10 @@ def _normalize(symbol: str) -> str:
         return symbol
     return symbol[:-4] + '/' + symbol[-4:]
 
-# ---------- المحفظة ----------
-async def get_balance(*a):
+# ─── المحفظة ───────────────────────────────────────────────────
+# FIX: ccxt is synchronous — wrap in asyncio.to_thread to avoid blocking the event loop
+
+def _fetch_balance_sync():
     exchange = _client()
     balance = exchange.fetch_balance()
     total_value = 0.0
@@ -29,36 +32,39 @@ async def get_balance(*a):
                     price = 1.0
                 else:
                     ticker = exchange.fetch_ticker(f"{coin}/USDT")
-                    price = ticker['last']
-            except:
+                    price = ticker['last'] or 0.0
+            except Exception:
                 price = 0.0
             value = amount * price
             total_value += value
             all_coins.append({
-                'coin': coin,
-                'free': free,
-                'used': used,
-                'total': amount,
-                'price': price,
-                'value': value
+                'coin': coin, 'free': free, 'used': used,
+                'total': amount, 'price': price, 'value': value
             })
     all_coins.sort(key=lambda x: x['value'], reverse=True)
     return {'all_coins': all_coins, 'total_value': total_value}
 
-# ---------- الأسعار ----------
-async def get_ticker_price(symbol, *a):
+async def get_balance(api_key: str = "", api_secret: str = "") -> dict:
+    return await asyncio.to_thread(_fetch_balance_sync)
+
+# ─── الأسعار ──────────────────────────────────────────────────
+def _fetch_price_sync(symbol: str) -> float:
     return _client().fetch_ticker(_normalize(symbol))['last']
 
-# ---------- الأوامر ----------
-async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
+async def get_ticker_price(symbol: str, *a) -> float:
+    return await asyncio.to_thread(_fetch_price_sync, symbol)
+
+# ─── الأوامر ──────────────────────────────────────────────────
+def _place_buy_sync(symbol: str, usdt_amount: float) -> dict:
     e = _client()
-    p = e.fetch_ticker(_normalize(symbol))['last']
+    sym = _normalize(symbol)
+    p = e.fetch_ticker(sym)['last']
     qty = usdt_amount / p
-    o = e.create_market_buy_order(_normalize(symbol), qty)
-    filled = float(o['filled'])
-    cost = float(o['cost'])
+    o = e.create_market_buy_order(sym, qty)
+    filled = float(o.get('filled') or qty)
+    cost = float(o.get('cost') or usdt_amount)
     return {
-        'order_id': o['id'],
+        'order_id': str(o.get('id', '')),
         'symbol': symbol,
         'side': 'buy',
         'quantity': filled,
@@ -66,12 +72,17 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
         'cost': usdt_amount,
     }
 
-async def place_sell_order(api_key, api_secret, symbol, quantity):
-    o = _client().create_market_sell_order(_normalize(symbol), quantity)
-    filled = float(o['filled'])
-    cost = float(o['cost'])
+async def place_buy_order(api_key: str, api_secret: str, symbol: str, usdt_amount: float) -> dict:
+    return await asyncio.to_thread(_place_buy_sync, symbol, usdt_amount)
+
+def _place_sell_sync(symbol: str, quantity: float) -> dict:
+    e = _client()
+    sym = _normalize(symbol)
+    o = e.create_market_sell_order(sym, quantity)
+    filled = float(o.get('filled') or quantity)
+    cost = float(o.get('cost') or 0)
     return {
-        'order_id': o['id'],
+        'order_id': str(o.get('id', '')),
         'symbol': symbol,
         'side': 'sell',
         'quantity': filled,
@@ -79,20 +90,29 @@ async def place_sell_order(api_key, api_secret, symbol, quantity):
         'cost': cost,
     }
 
-# ---------- الشموع ----------
-async def get_klines(symbol, interval='5m', limit=60):
+async def place_sell_order(api_key: str, api_secret: str, symbol: str, quantity: float) -> dict:
+    return await asyncio.to_thread(_place_sell_sync, symbol, quantity)
+
+# ─── الشموع ────────────────────────────────────────────────────
+def _fetch_klines_sync(symbol: str, interval: str, limit: int) -> list:
     ohlcv = _client().fetch_ohlcv(_normalize(symbol), timeframe=interval, limit=limit)
     return [{'open': o[1], 'high': o[2], 'low': o[3], 'close': o[4], 'volume': o[5]} for o in ohlcv]
 
-# ---------- أعلى العملات ----------
-async def get_top_symbols(count=200):
+async def get_klines(symbol: str, interval: str = '5m', limit: int = 60) -> list:
+    return await asyncio.to_thread(_fetch_klines_sync, symbol, interval, limit)
+
+# ─── أعلى العملات ─────────────────────────────────────────────
+def _fetch_top_symbols_sync(count: int) -> list:
     syms = []
     for s, t in _client().fetch_tickers().items():
         if s.endswith('/USDT'):
             try:
-                vol = float(t.get('quoteVolume', 0))
+                vol = float(t.get('quoteVolume') or 0)
                 syms.append({'symbol': s.replace('/', ''), 'volume': vol})
-            except:
+            except Exception:
                 continue
     syms.sort(key=lambda x: x['volume'], reverse=True)
     return [s['symbol'] for s in syms[:count]]
+
+async def get_top_symbols(count: int = 200) -> list:
+    return await asyncio.to_thread(_fetch_top_symbols_sync, count)
