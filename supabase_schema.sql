@@ -1,19 +1,46 @@
 -- ============================================================
--- GRD Trading Bot - Supabase Schema
--- Run this in the Supabase SQL Editor to create all tables
+-- GRD Trading Bot - Supabase Schema (v2)
+-- شغّل هذا الملف في Supabase SQL Editor
 -- ============================================================
 
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
-    id BIGINT PRIMARY KEY,          -- Telegram User ID
+    id BIGINT PRIMARY KEY,
     username TEXT,
     is_active BOOLEAN DEFAULT true,
-    auto_trade BOOLEAN DEFAULT false,
-    default_amount DECIMAL(18, 4) DEFAULT 10.0,
-    mexc_api_key TEXT DEFAULT '',
-    mexc_api_secret TEXT DEFAULT '',
+    -- استراتيجية EMA
+    ema_trade BOOLEAN DEFAULT false,
+    ema_amount DECIMAL(18, 4) DEFAULT 10.0,
+    -- استراتيجية HARPOON
+    harpoon_trade BOOLEAN DEFAULT false,
+    harpoon_amount DECIMAL(18, 4) DEFAULT 10.0,
+    -- البورصة المفضلة
+    exchange TEXT DEFAULT 'gate' CHECK (exchange IN ('gate', 'mexc', 'both')),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Migration: أضف الأعمدة الجديدة إذا كانت الجداول موجودة مسبقاً
+DO $$
+BEGIN
+    -- EMA columns
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='ema_trade') THEN
+        ALTER TABLE users ADD COLUMN ema_trade BOOLEAN DEFAULT false;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='ema_amount') THEN
+        ALTER TABLE users ADD COLUMN ema_amount DECIMAL(18,4) DEFAULT 10.0;
+    END IF;
+    -- HARPOON columns
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='harpoon_trade') THEN
+        ALTER TABLE users ADD COLUMN harpoon_trade BOOLEAN DEFAULT false;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='harpoon_amount') THEN
+        ALTER TABLE users ADD COLUMN harpoon_amount DECIMAL(18,4) DEFAULT 10.0;
+    END IF;
+    -- exchange column
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='exchange') THEN
+        ALTER TABLE users ADD COLUMN exchange TEXT DEFAULT 'gate';
+    END IF;
+END $$;
 
 -- Signals table
 CREATE TABLE IF NOT EXISTS signals (
@@ -43,34 +70,48 @@ CREATE TABLE IF NOT EXISTS trades (
     close_reason TEXT,
     pnl DECIMAL(18, 4),
     order_id TEXT,
-    signal_id UUID,
+    signal_id TEXT,
+    strategy TEXT DEFAULT 'EMA',
+    exchange TEXT DEFAULT 'GATE',
+    confirmations INT DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     closed_at TIMESTAMPTZ
 );
 
--- Indexes for performance
+-- Migration: أضف الأعمدة الجديدة في trades
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='strategy') THEN
+        ALTER TABLE trades ADD COLUMN strategy TEXT DEFAULT 'EMA';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='exchange') THEN
+        ALTER TABLE trades ADD COLUMN exchange TEXT DEFAULT 'GATE';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='confirmations') THEN
+        ALTER TABLE trades ADD COLUMN confirmations INT DEFAULT 0;
+    END IF;
+    -- تغيير نوع signal_id من UUID إلى TEXT
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='signal_id' AND data_type='uuid') THEN
+        ALTER TABLE trades ALTER COLUMN signal_id TYPE TEXT USING signal_id::TEXT;
+    END IF;
+END $$;
+
+-- Indexes
 CREATE INDEX IF NOT EXISTS idx_trades_user_id ON trades(user_id);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at DESC);
 
--- Enable Row Level Security
+-- Row Level Security
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE signals ENABLE ROW LEVEL SECURITY;
 
--- Allow service role full access (used by the bot backend)
--- USING covers SELECT/UPDATE/DELETE row filtering
--- WITH CHECK covers INSERT/UPDATE row validation
 DROP POLICY IF EXISTS "service_role_all" ON users;
 DROP POLICY IF EXISTS "service_role_all" ON trades;
 DROP POLICY IF EXISTS "service_role_all" ON signals;
 
-CREATE POLICY "service_role_all" ON users
-    FOR ALL USING (true) WITH CHECK (true);
-
-CREATE POLICY "service_role_all" ON trades
-    FOR ALL USING (true) WITH CHECK (true);
-
-CREATE POLICY "service_role_all" ON signals
-    FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "service_role_all" ON users FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "service_role_all" ON trades FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "service_role_all" ON signals FOR ALL USING (true) WITH CHECK (true);
