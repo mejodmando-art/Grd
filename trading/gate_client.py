@@ -2,7 +2,7 @@ import asyncio
 import ccxt
 import os
 import logging
-from typing import Optional
+from typing import Optional, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ def _client(api_key: str = "", api_secret: str = "") -> ccxt.Exchange:
             'secret': api_secret or os.getenv('GATE_API_SECRET', ''),
             'options': {'defaultType': 'spot'},
             'enableRateLimit': True,
-            'rateLimit': 200,  # 200ms between requests
+            'rateLimit': 200,
         })
     return _clients[key]
 
@@ -27,7 +27,7 @@ def _client(api_key: str = "", api_secret: str = "") -> ccxt.Exchange:
 def _normalize(symbol: str) -> str:
     """Normalize symbol to CCXT format: BTC/USDT"""
     if '/' in symbol:
-        return symbol
+        return symbol.upper()
     for quote in ['USDT', 'BTC', 'ETH', 'USD', 'USDC']:
         if symbol.upper().endswith(quote):
             return symbol.upper()[:-len(quote)] + '/' + quote
@@ -115,7 +115,11 @@ def _place_buy_sync(api_key: str, api_secret: str, symbol: str, usdt_amount: flo
     try:
         e = _client(api_key, api_secret)
         sym = _normalize(symbol)
+
+        # Get current price
         p = e.fetch_ticker(sym)['last']
+
+        # Calculate quantity
         qty = usdt_amount / p
 
         # Get market info for precision
@@ -123,7 +127,17 @@ def _place_buy_sync(api_key: str, api_secret: str, symbol: str, usdt_amount: flo
         amount_precision = market['precision']['amount'] if 'precision' in market else 8
         qty = round(qty, amount_precision)
 
-        o = e.create_market_buy_order(sym, qty)
+        # Gate.io CCXT: create_market_buy_order needs price parameter!
+        # For spot market buy, we use create_order with type='market'
+        o = e.create_order(
+            sym,
+            'market',
+            'buy',
+            qty,
+            None,  # price is None for market order
+            {'createMarketBuyOrderRequiresPrice': False}  # Disable price requirement
+        )
+
         filled = float(o.get('filled') or qty)
         cost = float(o.get('cost') or usdt_amount)
 
@@ -165,6 +179,7 @@ def _place_sell_sync(api_key: str, api_secret: str, symbol: str, quantity: float
         qty = round(quantity, amount_precision)
 
         o = e.create_market_sell_order(sym, qty)
+
         filled = float(o.get('filled') or qty)
         cost = float(o.get('cost') or 0)
 
@@ -234,7 +249,7 @@ def _fetch_top_symbols_sync(api_key: str, api_secret: str, count: int) -> list:
         usdt_pairs = [s for s in markets if s.endswith('/USDT')]
 
         # Fetch tickers for specific pairs (more efficient than all tickers)
-        tickers = exchange.fetch_tickers(usdt_pairs[:count * 2])  # Fetch extra for filtering
+        tickers = exchange.fetch_tickers(usdt_pairs[:count * 2])
 
         syms = []
         for s, t in tickers.items():
