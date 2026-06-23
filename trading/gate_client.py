@@ -11,7 +11,7 @@ def _normalize(symbol: str) -> str:
     if '/' in symbol: return symbol
     return symbol[:-4] + '/' + symbol[-4:]
 
-# ---------- محفظة شاملة ----------
+# ---------- عرض المحفظة الكاملة ----------
 async def get_balance(*a):
     exchange = _client()
     balance = exchange.fetch_balance()
@@ -36,7 +36,7 @@ async def get_balance(*a):
     all_coins.sort(key=lambda x: x['value'], reverse=True)
     return {'all_coins': all_coins, 'total_value': total_value}
 
-# ---------- رصيد USDT فقط (للتداول) ----------
+# ---------- رصيد USDT المتاح للتداول ----------
 async def get_usdt_free():
     try:
         exchange = _client()
