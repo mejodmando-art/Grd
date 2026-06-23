@@ -1,10 +1,4 @@
-
-# I'll create the 6 fixed files with all improvements
-
-# ============================================
-# 1. FIXED gate_client.py
-# ============================================
-gate_client_fixed = '''import asyncio
+import asyncio
 import ccxt
 import os
 import logging
@@ -49,22 +43,22 @@ def _fetch_balance_sync(api_key: str = "", api_secret: str = "") -> dict:
         balance = exchange.fetch_balance()
         total_value = 0.0
         all_coins = []
-        
+
         # Fetch all tickers at once to avoid rate limits
         all_tickers = exchange.fetch_tickers()
-        
+
         currencies = balance.get('total', {})
         for coin, amount in currencies.items():
             if amount > 0:
                 free = balance.get('free', {}).get(coin, 0)
                 used = balance.get('used', {}).get(coin, 0)
-                
+
                 if coin == 'USDT':
                     price = 1.0
                 else:
                     ticker = all_tickers.get(f"{coin}/USDT", {})
                     price = ticker.get('last', 0.0) or 0.0
-                
+
                 value = amount * price
                 total_value += value
                 all_coins.append({
@@ -75,10 +69,10 @@ def _fetch_balance_sync(api_key: str = "", api_secret: str = "") -> dict:
                     'price': price,
                     'value': value
                 })
-        
+
         all_coins.sort(key=lambda x: x['value'], reverse=True)
         return {'all_coins': all_coins, 'total_value': total_value}
-    
+
     except ccxt.NetworkError as e:
         logger.warning(f"Network error fetching balance: {e}")
         raise
@@ -123,18 +117,18 @@ def _place_buy_sync(api_key: str, api_secret: str, symbol: str, usdt_amount: flo
         sym = _normalize(symbol)
         p = e.fetch_ticker(sym)['last']
         qty = usdt_amount / p
-        
+
         # Get market info for precision
         market = e.market(sym)
         amount_precision = market['precision']['amount'] if 'precision' in market else 8
         qty = round(qty, amount_precision)
-        
+
         o = e.create_market_buy_order(sym, qty)
         filled = float(o.get('filled') or qty)
         cost = float(o.get('cost') or usdt_amount)
-        
+
         logger.info(f"Gate.io buy order: {sym} | qty={filled} | cost={cost}")
-        
+
         return {
             'order_id': str(o.get('id', '')),
             'symbol': symbol,
@@ -164,18 +158,18 @@ def _place_sell_sync(api_key: str, api_secret: str, symbol: str, quantity: float
     try:
         e = _client(api_key, api_secret)
         sym = _normalize(symbol)
-        
+
         # Get market info for precision
         market = e.market(sym)
         amount_precision = market['precision']['amount'] if 'precision' in market else 8
         qty = round(quantity, amount_precision)
-        
+
         o = e.create_market_sell_order(sym, qty)
         filled = float(o.get('filled') or qty)
         cost = float(o.get('cost') or 0)
-        
+
         logger.info(f"Gate.io sell order: {sym} | qty={filled} | cost={cost}")
-        
+
         return {
             'order_id': str(o.get('id', '')),
             'symbol': symbol,
@@ -235,13 +229,13 @@ def _fetch_top_symbols_sync(api_key: str, api_secret: str, count: int) -> list:
     try:
         exchange = _client(api_key, api_secret)
         markets = exchange.load_markets()
-        
+
         # Get USDT pairs only
         usdt_pairs = [s for s in markets if s.endswith('/USDT')]
-        
+
         # Fetch tickers for specific pairs (more efficient than all tickers)
         tickers = exchange.fetch_tickers(usdt_pairs[:count * 2])  # Fetch extra for filtering
-        
+
         syms = []
         for s, t in tickers.items():
             if s.endswith('/USDT'):
@@ -251,10 +245,10 @@ def _fetch_top_symbols_sync(api_key: str, api_secret: str, count: int) -> list:
                         syms.append({'symbol': s.replace('/', ''), 'volume': vol})
                 except Exception:
                     continue
-        
+
         syms.sort(key=lambda x: x['volume'], reverse=True)
         return [s['symbol'] for s in syms[:count]]
-    
+
     except ccxt.NetworkError as e:
         logger.warning(f"Network error fetching top symbols: {e}")
         raise
@@ -266,9 +260,3 @@ def _fetch_top_symbols_sync(api_key: str, api_secret: str, count: int) -> list:
 async def get_top_symbols(count: int = 200, api_key: str = "", api_secret: str = "") -> list:
     """Async wrapper for get_top_symbols."""
     return await asyncio.to_thread(_fetch_top_symbols_sync, api_key, api_secret, count)
-'''
-
-with open('/mnt/agents/output/gate_client_fixed.py', 'w', encoding='utf-8') as f:
-    f.write(gate_client_fixed)
-
-print("✅ gate_client_fixed.py saved")
