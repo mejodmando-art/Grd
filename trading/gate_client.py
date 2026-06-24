@@ -4,23 +4,26 @@ logger = logging.getLogger("GateClient")
 
 # ─── إعدادات الاتصال بـ Gate.io ──────────────────────────────────────────────
 
-def _client():
-    """إنشاء اتصال بـ Gate.io مع تفعيل Rate Limiting"""
-    return ccxt.gate({
-        'apiKey': os.getenv('GATE_API_KEY', ''),
-        'secret': os.getenv('GATE_API_SECRET', ''),
-        'options': {'defaultType': 'spot'},
-        'enableRateLimit': True,          # ✅ تفعيل الحد من الطلبات
-        'rateLimit': 100,                 # 100ms بين كل طلب (10 طلب/ثانية)
-    })
+_gate_client = None
 
+def _client():
+    """إنشاء اتصال بـ Gate.io مع تفعيل Rate Limiting (singleton)"""
+    global _gate_client
+    if _gate_client is None:
+        _gate_client = ccxt.gate({
+            'apiKey': os.getenv('GATE_API_KEY', ''),
+            'secret': os.getenv('GATE_API_SECRET', ''),
+            'options': {'defaultType': 'spot'},
+            'enableRateLimit': True,
+            'rateLimit': 100,
+        })
+    return _gate_client
 
 def _normalize(symbol: str) -> str:
     """تحويل BTCUSDT → BTC/USDT"""
     if '/' in symbol:
         return symbol
     return symbol[:-4] + '/' + symbol[-4:]
-
 
 # ─── معلومات السوق (precisions & limits) ────────────────────────────────────
 
@@ -43,7 +46,6 @@ def _get_market_info(symbol: str):
             return None
     return _MARKET_CACHE.get(norm)
 
-
 # ─── تنسيق الكمية والسعر ────────────────────────────────────────────────────
 
 def _format_qty(symbol: str, qty: float) -> float:
@@ -56,8 +58,8 @@ def _format_qty(symbol: str, qty: float) -> float:
             return float(formatted)
         except Exception as ex:
             logger.warning(f"amount_to_precision failed for {symbol}: {ex}, using rounded value")
+            return round(qty, 6)
     return round(qty, 6)
-
 
 def _format_price(symbol: str, price: float) -> float:
     """تنسيق السعر حسب دقة السوق"""
@@ -69,8 +71,8 @@ def _format_price(symbol: str, price: float) -> float:
             return float(formatted)
         except Exception as ex:
             logger.warning(f"price_to_precision failed for {symbol}: {ex}, using rounded value")
+            return round(price, 8)
     return round(price, 8)
-
 
 def _get_min_amount(symbol: str) -> float:
     """الحد الأدنى للكمية"""
@@ -79,9 +81,8 @@ def _get_min_amount(symbol: str) -> float:
         limits = info.get('limits', {})
         amount_min = limits.get('amount', {}).get('min')
         cost_min = limits.get('cost', {}).get('min')
-        return max(amount_min or 0, (cost_min or 0) / 1000)  # rough estimate if only cost limit
+        return max(amount_min or 0, (cost_min or 0) / 1000)
     return 0.0001
-
 
 def _get_min_cost(symbol: str) -> float:
     """الحد الأدنى للقيمة بالـ USDT"""
@@ -91,7 +92,6 @@ def _get_min_cost(symbol: str) -> float:
         cost_min = limits.get('cost', {}).get('min')
         return cost_min or 1.0
     return 1.0
-
 
 # ─── عرض المحفظة الكاملة ────────────────────────────────────────────────────
 
@@ -118,7 +118,6 @@ async def get_balance(*a):
             all_coins.append({'coin': coin, 'free': free, 'used': used, 'total': amount, 'price': price, 'value': value})
     all_coins.sort(key=lambda x: x['value'], reverse=True)
     return {'all_coins': all_coins, 'total_value': total_value}
-
 
 # ─── رصيد USDT المتاح للتداول ─────────────────────────────────────────────────
 
@@ -148,12 +147,10 @@ async def get_usdt_free():
         logger.error(f"Unexpected error fetching USDT balance: {e}")
         raise Exception(f"خطأ غير متوقع في جلب الرصيد: {e}") from e
 
-
 # ─── الأسعار ────────────────────────────────────────────────────────────────
 
 async def get_ticker_price(symbol, *a):
     return _client().fetch_ticker(_normalize(symbol))['last']
-
 
 # ─── أوامر الشراء والبيع ────────────────────────────────────────────────────
 
@@ -162,6 +159,7 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
     تنفيذ أمر شراء سوقي مع:
     - التأكد من الحد الأدنى للصفقة
     - تنسيق الكمية حسب دقة السوق
+    - تمرير السعر لـ Gate.io (إصلاح الخطأ)
     """
     if usdt_amount < 1:
         raise ValueError(f"المبلغ {usdt_amount} أقل من الحد الأدنى ($1)")
@@ -181,7 +179,7 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
     # التأكد من الحد الأدنى للكمية
     min_qty = _get_min_amount(symbol)
     if qty < min_qty:
-        qty = math.ceil(min_qty * 1000000) / 1000000  # round up to min
+        qty = math.ceil(min_qty * 1000000) / 1000000
         logger.info(f"Adjusted qty to minimum {qty} for {symbol}")
 
     # التأكد من الحد الأدنى للقيمة
@@ -191,10 +189,13 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
         qty = _format_qty(symbol, min_cost / p)
         logger.info(f"Adjusted qty to meet min cost ${min_cost}: {qty}")
 
+    # ✅ تنسيق السعر للـ Gate.io
+    formatted_price = _format_price(symbol, p)
+
     logger.info(f"Placing BUY order: {symbol} | qty={qty} | price≈{p} | cost≈{qty*p:.2f} USDT")
 
-    # تنفيذ الأمر
-    o = e.create_market_buy_order(norm, qty)
+    # ✅ الإصلاح الرئيسي: تمرير السعر كـ parameter ثالث
+    o = e.create_market_buy_order(norm, qty, formatted_price)
 
     filled = float(o.get('filled', 0))
     cost = float(o.get('cost', 0))
@@ -209,7 +210,6 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
         'entry_price': round(cost / filled if filled else p, 8),
         'cost': cost
     }
-
 
 async def place_sell_order(api_key, api_secret, symbol, quantity):
     """
@@ -243,13 +243,11 @@ async def place_sell_order(api_key, api_secret, symbol, quantity):
         'cost': cost
     }
 
-
 # ─── الشموع ──────────────────────────────────────────────────────────────────
 
 async def get_klines(symbol, interval='5m', limit=60):
     ohlcv = _client().fetch_ohlcv(_normalize(symbol), timeframe=interval, limit=limit)
     return [{'open': o[1], 'high': o[2], 'low': o[3], 'close': o[4], 'volume': o[5]} for o in ohlcv]
-
 
 # ─── أعلى العملات ────────────────────────────────────────────────────────────
 
