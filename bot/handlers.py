@@ -1,7 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from trading.gate_client import get_balance
-from database.client import get_user, create_user, update_user, get_open_trades, get_trade_history
+from database.client import get_user, create_user, update_user, get_open_trades
 
 async def main_menu():
     return InlineKeyboardMarkup([
@@ -12,15 +12,25 @@ async def main_menu():
 
 async def settings_menu(user):
     ema = "✅" if user.get("ema_trade", True) else "❌"
-    harpoon = "✅" if user.get("harpoon_trade", False) else "❌"
+    harp = "✅" if user.get("harpoon_trade", False) else "❌"
+    sphinx = "✅" if user.get("sphinx_trade", False) else "❌"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📈 EMA: {ema}", callback_data="toggle_ema")],
+        [InlineKeyboardButton(f"🐋 Harpoon: {harp}", callback_data="toggle_harpoon")],
+        [InlineKeyboardButton(f"🦁 SPHINX: {sphinx}", callback_data="toggle_sphinx")],
+        [InlineKeyboardButton("💵 تغيير المبالغ", callback_data="amounts_menu")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")],
+    ])
+
+async def amounts_menu(user):
     ema_amt = user.get('ema_amount', 10)
     harp_amt = user.get('harpoon_amount', 10)
+    sphinx_amt = user.get('sphinx_amount', 10)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📈 EMA: {ema} (${ema_amt})", callback_data="toggle_ema")],
-        [InlineKeyboardButton(f"🐋 Harpoon: {harpoon} (${harp_amt})", callback_data="toggle_harpoon")],
-        [InlineKeyboardButton("💵 تغيير مبلغ EMA", callback_data="set_ema_amount")],
-        [InlineKeyboardButton("💵 تغيير مبلغ Harpoon", callback_data="set_harp_amount")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")],
+        [InlineKeyboardButton(f"📈 EMA: ${ema_amt}", callback_data="set_ema_amt")],
+        [InlineKeyboardButton(f"🐋 Harpoon: ${harp_amt}", callback_data="set_harp_amt")],
+        [InlineKeyboardButton(f"🦁 SPHINX: ${sphinx_amt}", callback_data="set_sphinx_amt")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="settings")],
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -29,13 +39,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not u:
         await create_user(user.id, user.username or user.first_name or "")
     await update.message.reply_text(
-        "🤖 <b>GRD Trading Bot</b>\n"
-        "بوت التداول الآلي على Gate.io\n\n"
-        "📈 استراتيجية EMA: متابعة الترند\n"
-        "🐋 استراتيجية Harpoon: صيد الحركات السريعة\n\n"
+        "🤖 <b>GRD Trading Bot v3.0</b>\n\n"
+        "📈 <b>EMA</b> — متابعة الترند\n"
+        "🐋 <b>Harpoon</b> — صيد الحركات السريعة\n"
+        "🦁 <b>SPHINX</b> — مسح السيولة + تباعد الزخم\n\n"
         "اختر من القائمة:",
-        reply_markup=await main_menu(),
-        parse_mode="HTML"
+        reply_markup=await main_menu(), parse_mode="HTML"
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,61 +73,69 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📊 <b>صفقات مفتوحة:</b>\n"
         for t in open_trades:
             strat = t.get('strategy', 'EMA')
-            msg += f"• {t['symbol']} | {strat} | دخول: {t['entry_price']} | ${t['amount']}\n"
+            emoji = {"EMA": "📈", "HARPOON": "🐋", "SPHINX": "🦁"}.get(strat, "🚀")
+            msg += f"{emoji} {t['symbol']} | {strat} | دخول: {t['entry_price']}\n"
         await q.edit_message_text(msg, reply_markup=await main_menu(), parse_mode="HTML")
 
     elif d == "settings":
-        await q.edit_message_text("⚙️ <b>الإعدادات</b>\n\n"
-            "📈 EMA: متابعة الترند البطيء\n"
-            "🐋 Harpoon: صيد الحركات السريعة\n"
-            "💵 يمكنك تغيير المبلغ لكل استراتيجية",
-            reply_markup=await settings_menu(u), parse_mode="HTML")
+        await q.edit_message_text(
+            "⚙️ <b>الإعدادات</b>\n\n"
+            "🦁 <b>SPHINX</b>: استراتيجية السيولة الذكية\n"
+            "تكتشف مسح السيولة + تباعد الزخم\n"
+            "Risk/Reward = 1:2.5 | SL ديناميكي (ATR)",
+            reply_markup=await settings_menu(u), parse_mode="HTML"
+        )
 
     elif d == "toggle_ema":
         new_val = not u.get("ema_trade", True)
         await update_user(u["id"], {"ema_trade": new_val})
         u = await get_user(q.from_user.id)
-        status = "✅ تم التفعيل" if new_val else "❌ تم التعطيل"
-        await q.edit_message_text(f"📈 EMA\n{status}", reply_markup=await settings_menu(u))
+        await q.edit_message_text(f"📈 EMA: {'✅ تفعيل' if new_val else '❌ تعطيل'}", reply_markup=await settings_menu(u))
 
     elif d == "toggle_harpoon":
         new_val = not u.get("harpoon_trade", False)
         await update_user(u["id"], {"harpoon_trade": new_val})
         u = await get_user(q.from_user.id)
-        status = "✅ تم التفعيل" if new_val else "❌ تم التعطيل"
-        await q.edit_message_text(f"🐋 Harpoon\n{status}", reply_markup=await settings_menu(u))
+        await q.edit_message_text(f"🐋 Harpoon: {'✅ تفعيل' if new_val else '❌ تعطيل'}", reply_markup=await settings_menu(u))
 
-    elif d == "set_ema_amount":
+    elif d == "toggle_sphinx":
+        new_val = not u.get("sphinx_trade", False)
+        await update_user(u["id"], {"sphinx_trade": new_val})
+        u = await get_user(q.from_user.id)
+        await q.edit_message_text(f"🦁 SPHINX: {'✅ تفعيل' if new_val else '❌ تعطيل'}", reply_markup=await settings_menu(u))
+
+    elif d == "amounts_menu":
+        await q.edit_message_text("💵 <b>تغيير المبالغ</b>", reply_markup=await amounts_menu(u), parse_mode="HTML")
+
+    elif d == "set_ema_amt":
         context.user_data["awaiting"] = "ema_amount"
-        await q.edit_message_text("💵 أرسل مبلغ EMA الجديد (USDT):", reply_markup=await main_menu())
+        await q.edit_message_text("📈 أرسل مبلغ EMA الجديد (USDT):", reply_markup=await main_menu())
 
-    elif d == "set_harp_amount":
+    elif d == "set_harp_amt":
         context.user_data["awaiting"] = "harpoon_amount"
-        await q.edit_message_text("💵 أرسل مبلغ Harpoon الجديد (USDT):", reply_markup=await main_menu())
+        await q.edit_message_text("🐋 أرسل مبلغ Harpoon الجديد (USDT):", reply_markup=await main_menu())
+
+    elif d == "set_sphinx_amt":
+        context.user_data["awaiting"] = "sphinx_amount"
+        await q.edit_message_text("🦁 أرسل مبلغ SPHINX الجديد (USDT):\n\n"
+            "<i>موصى به: $25-$50 (صفقات أقل لكن أقوى)</i>", reply_markup=await main_menu(), parse_mode="HTML")
 
     elif d == "main_menu":
         await q.edit_message_text("🤖 <b>القائمة الرئيسية</b>", reply_markup=await main_menu(), parse_mode="HTML")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("awaiting") == "ema_amount":
-        try:
-            amt = float(update.message.text.strip())
-            if amt <= 0: raise ValueError
-            await update_user(update.effective_user.id, {"ema_amount": amt})
-            context.user_data["awaiting"] = None
-            await update.message.reply_text(f"✅ مبلغ EMA: ${amt}", reply_markup=await main_menu())
-        except:
-            await update.message.reply_text("❌ رقم غير صحيح.")
-
-    elif context.user_data.get("awaiting") == "harpoon_amount":
-        try:
-            amt = float(update.message.text.strip())
-            if amt <= 0: raise ValueError
-            await update_user(update.effective_user.id, {"harpoon_amount": amt})
-            context.user_data["awaiting"] = None
-            await update.message.reply_text(f"✅ مبلغ Harpoon: ${amt}", reply_markup=await main_menu())
-        except:
-            await update.message.reply_text("❌ رقم غير صحيح.")
+    field = context.user_data.get("awaiting")
+    if not field:
+        return
+    try:
+        amt = float(update.message.text.strip())
+        if amt <= 0: raise ValueError
+        await update_user(update.effective_user.id, {field: amt})
+        context.user_data["awaiting"] = None
+        names = {"ema_amount": "📈 EMA", "harpoon_amount": "🐋 Harpoon", "sphinx_amount": "🦁 SPHINX"}
+        await update.message.reply_text(f"✅ {names.get(field, 'المبلغ')}: ${amt}", reply_markup=await main_menu())
+    except:
+        await update.message.reply_text("❌ رقم غير صحيح.")
 
 def register_handlers(app: Application):
     app.add_handler(CommandHandler("start", start))
