@@ -1,48 +1,42 @@
 -- ============================================================
--- GRD Trading Bot - Supabase Schema (v2)
--- شغّل هذا الملف في Supabase SQL Editor
+-- GRD Trading Bot - Supabase Schema (v3)
 -- ============================================================
 
--- Users table
 CREATE TABLE IF NOT EXISTS users (
     id BIGINT PRIMARY KEY,
     username TEXT,
     is_active BOOLEAN DEFAULT true,
-    -- استراتيجية EMA
-    ema_trade BOOLEAN DEFAULT false,
+    -- Strategy: EMA
+    ema_trade BOOLEAN DEFAULT true,
     ema_amount DECIMAL(18, 4) DEFAULT 10.0,
-    -- استراتيجية HARPOON
+    -- Strategy: HARPOON
     harpoon_trade BOOLEAN DEFAULT false,
     harpoon_amount DECIMAL(18, 4) DEFAULT 10.0,
-    -- البورصة المفضلة
+    -- Exchange preference
     exchange TEXT DEFAULT 'gate' CHECK (exchange IN ('gate', 'mexc', 'both')),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Migration: أضف الأعمدة الجديدة إذا كانت الجداول موجودة مسبقاً
+-- Migration: add columns if table exists
 DO $$
 BEGIN
-    -- EMA columns
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='ema_trade') THEN
-        ALTER TABLE users ADD COLUMN ema_trade BOOLEAN DEFAULT false;
+        ALTER TABLE users ADD COLUMN ema_trade BOOLEAN DEFAULT true;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='ema_amount') THEN
         ALTER TABLE users ADD COLUMN ema_amount DECIMAL(18,4) DEFAULT 10.0;
     END IF;
-    -- HARPOON columns
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='harpoon_trade') THEN
         ALTER TABLE users ADD COLUMN harpoon_trade BOOLEAN DEFAULT false;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='harpoon_amount') THEN
         ALTER TABLE users ADD COLUMN harpoon_amount DECIMAL(18,4) DEFAULT 10.0;
     END IF;
-    -- exchange column
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='exchange') THEN
         ALTER TABLE users ADD COLUMN exchange TEXT DEFAULT 'gate';
     END IF;
 END $$;
 
--- Signals table
 CREATE TABLE IF NOT EXISTS signals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     symbol TEXT NOT NULL,
@@ -54,7 +48,6 @@ CREATE TABLE IF NOT EXISTS signals (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Trades table
 CREATE TABLE IF NOT EXISTS trades (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
@@ -78,7 +71,7 @@ CREATE TABLE IF NOT EXISTS trades (
     closed_at TIMESTAMPTZ
 );
 
--- Migration: أضف الأعمدة الجديدة في trades
+-- Migration for trades
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='strategy') THEN
@@ -90,7 +83,6 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='confirmations') THEN
         ALTER TABLE trades ADD COLUMN confirmations INT DEFAULT 0;
     END IF;
-    -- تغيير نوع signal_id من UUID إلى TEXT
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='signal_id' AND data_type='uuid') THEN
         ALTER TABLE trades ALTER COLUMN signal_id TYPE TEXT USING signal_id::TEXT;
     END IF;
