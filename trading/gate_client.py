@@ -187,8 +187,14 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
     formatted_price = _format_price(symbol, p)
     logger.info(f"BUY: {symbol} | qty={qty} | price≈{p} | mcap≈${mcap/1e6:.0f}M")
 
-    # ✅ FIX: Pass price as 3rd argument for Gate.io
-    o = e.create_market_buy_order(norm, qty, formatted_price)
+    # ✅ FIX: Use create_order with explicit named parameters
+    o = e.create_order(
+        symbol=norm,
+        type='market',
+        side='buy',
+        amount=qty,
+        price=formatted_price
+    )
 
     filled = float(o.get('filled', 0))
     cost = float(o.get('cost', 0))
