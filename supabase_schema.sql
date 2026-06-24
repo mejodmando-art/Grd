@@ -1,5 +1,5 @@
 -- ============================================================
--- GRD Trading Bot - Supabase Schema (v3)
+-- GRD Trading Bot - Supabase Schema v3 (with SPHINX)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS users (
@@ -12,12 +12,15 @@ CREATE TABLE IF NOT EXISTS users (
     -- Strategy: HARPOON
     harpoon_trade BOOLEAN DEFAULT false,
     harpoon_amount DECIMAL(18, 4) DEFAULT 10.0,
-    -- Exchange preference
+    -- Strategy: SPHINX (Legendary)
+    sphinx_trade BOOLEAN DEFAULT false,
+    sphinx_amount DECIMAL(18, 4) DEFAULT 25.0,
+    -- Exchange
     exchange TEXT DEFAULT 'gate' CHECK (exchange IN ('gate', 'mexc', 'both')),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Migration: add columns if table exists
+-- Migration
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='ema_trade') THEN
@@ -31,6 +34,12 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='harpoon_amount') THEN
         ALTER TABLE users ADD COLUMN harpoon_amount DECIMAL(18,4) DEFAULT 10.0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='sphinx_trade') THEN
+        ALTER TABLE users ADD COLUMN sphinx_trade BOOLEAN DEFAULT false;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='sphinx_amount') THEN
+        ALTER TABLE users ADD COLUMN sphinx_amount DECIMAL(18,4) DEFAULT 25.0;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='exchange') THEN
         ALTER TABLE users ADD COLUMN exchange TEXT DEFAULT 'gate';
@@ -71,7 +80,6 @@ CREATE TABLE IF NOT EXISTS trades (
     closed_at TIMESTAMPTZ
 );
 
--- Migration for trades
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trades' AND column_name='strategy') THEN
@@ -88,14 +96,12 @@ BEGIN
     END IF;
 END $$;
 
--- Indexes
 CREATE INDEX IF NOT EXISTS idx_trades_user_id ON trades(user_id);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_created_at ON trades(created_at DESC);
 
--- Row Level Security
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE signals ENABLE ROW LEVEL SECURITY;
