@@ -1,13 +1,11 @@
-import ccxt, os, logging, math
+import ccxt, os, logging, math, urllib.request, json
 
 logger = logging.getLogger("GateClient")
 
-# ─── إعدادات الاتصال بـ Gate.io ──────────────────────────────────────────────
-
+# ─── Singleton Gate.io Client ───────────────────────────────────────────────
 _gate_client = None
 
 def _client():
-    """إنشاء اتصال بـ Gate.io مع تفعيل Rate Limiting (singleton)"""
     global _gate_client
     if _gate_client is None:
         _gate_client = ccxt.gate({
@@ -20,17 +18,42 @@ def _client():
     return _gate_client
 
 def _normalize(symbol: str) -> str:
-    """تحويل BTCUSDT → BTC/USDT"""
     if '/' in symbol:
         return symbol
     return symbol[:-4] + '/' + symbol[-4:]
 
-# ─── معلومات السوق (precisions & limits) ────────────────────────────────────
+# ─── Filters ──────────────────────────────────────────────────────────────────
+STABLECOINS = {'USDT', 'USDC', 'DAI', 'BUSD', 'TUSD', 'FDUSD', 'USDE', 'PYUSD'}
+MAX_MARKET_CAP = 5_000_000_000
 
+def _is_stable_pair(symbol: str) -> bool:
+    base = symbol.replace('/USDT', '').replace('USDT', '').upper()
+    return base in STABLECOINS
+
+_MCAP_CACHE = {}
+
+def _get_market_cap(symbol: str) -> float:
+    base = symbol.replace('/USDT', '').replace('USDT', '').upper()
+    if base in _MCAP_CACHE:
+        return _MCAP_CACHE[base]
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&symbols={base.lower()}&per_page=1"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read())
+            if data and len(data) > 0:
+                mcap = float(data[0].get('market_cap', 0))
+                _MCAP_CACHE[base] = mcap
+                return mcap
+    except Exception as e:
+        logger.warning(f"Market cap fetch failed for {base}: {e}")
+    _MCAP_CACHE[base] = 0.0
+    return 0.0
+
+# ─── Market Info Cache ──────────────────────────────────────────────────────
 _MARKET_CACHE = {}
 
 def _get_market_info(symbol: str):
-    """جلب معلومات السوق: min amount, precisions, إلخ"""
     global _MARKET_CACHE
     norm = _normalize(symbol)
     if norm not in _MARKET_CACHE:
@@ -46,10 +69,7 @@ def _get_market_info(symbol: str):
             return None
     return _MARKET_CACHE.get(norm)
 
-# ─── تنسيق الكمية والسعر ────────────────────────────────────────────────────
-
 def _format_qty(symbol: str, qty: float) -> float:
-    """تنسيق الكمية حسب دقة السوق"""
     info = _get_market_info(symbol)
     if info:
         try:
@@ -57,12 +77,11 @@ def _format_qty(symbol: str, qty: float) -> float:
             formatted = e.amount_to_precision(_normalize(symbol), qty)
             return float(formatted)
         except Exception as ex:
-            logger.warning(f"amount_to_precision failed for {symbol}: {ex}, using rounded value")
+            logger.warning(f"amount_to_precision failed for {symbol}: {ex}")
             return round(qty, 6)
     return round(qty, 6)
 
 def _format_price(symbol: str, price: float) -> float:
-    """تنسيق السعر حسب دقة السوق"""
     info = _get_market_info(symbol)
     if info:
         try:
@@ -70,12 +89,11 @@ def _format_price(symbol: str, price: float) -> float:
             formatted = e.price_to_precision(_normalize(symbol), price)
             return float(formatted)
         except Exception as ex:
-            logger.warning(f"price_to_precision failed for {symbol}: {ex}, using rounded value")
+            logger.warning(f"price_to_precision failed for {symbol}: {ex}")
             return round(price, 8)
     return round(price, 8)
 
 def _get_min_amount(symbol: str) -> float:
-    """الحد الأدنى للكمية"""
     info = _get_market_info(symbol)
     if info:
         limits = info.get('limits', {})
@@ -85,7 +103,6 @@ def _get_min_amount(symbol: str) -> float:
     return 0.0001
 
 def _get_min_cost(symbol: str) -> float:
-    """الحد الأدنى للقيمة بالـ USDT"""
     info = _get_market_info(symbol)
     if info:
         limits = info.get('limits', {})
@@ -93,8 +110,7 @@ def _get_min_cost(symbol: str) -> float:
         return cost_min or 1.0
     return 1.0
 
-# ─── عرض المحفظة الكاملة ────────────────────────────────────────────────────
-
+# ─── Balance ──────────────────────────────────────────────────────────────────
 async def get_balance(*a):
     exchange = _client()
     balance = exchange.fetch_balance()
@@ -106,11 +122,7 @@ async def get_balance(*a):
             free = balance.get('free', {}).get(coin, 0)
             used = balance.get('used', {}).get(coin, 0)
             try:
-                if coin == 'USDT':
-                    price = 1.0
-                else:
-                    ticker = exchange.fetch_ticker(f"{coin}/USDT")
-                    price = ticker['last']
+                price = 1.0 if coin == 'USDT' else exchange.fetch_ticker(f"{coin}/USDT")['last']
             except:
                 price = 0.0
             value = amount * price
@@ -119,13 +131,7 @@ async def get_balance(*a):
     all_coins.sort(key=lambda x: x['value'], reverse=True)
     return {'all_coins': all_coins, 'total_value': total_value}
 
-# ─── رصيد USDT المتاح للتداول ─────────────────────────────────────────────────
-
 async def get_usdt_free():
-    """
-    يرجع رصيد USDT المتاح.
-    في حالة الخطأ: يرمي Exception بدلاً من إرجاع 0.0
-    """
     try:
         exchange = _client()
         balance = exchange.fetch_balance()
@@ -135,71 +141,57 @@ async def get_usdt_free():
         logger.info(f"USDT Balance — Free: {free:.2f}, Used: {used:.2f}, Total: {total:.2f}")
         return free
     except ccxt.AuthenticationError as e:
-        logger.error(f"Gate.io Authentication Error: {e}")
         raise Exception("فشل المصادقة مع Gate.io — تأكد من API Keys") from e
     except ccxt.NetworkError as e:
-        logger.error(f"Gate.io Network Error: {e}")
-        raise Exception("مشكلة في الاتصال بـ Gate.io — جرب تاني") from e
-    except ccxt.ExchangeError as e:
-        logger.error(f"Gate.io Exchange Error: {e}")
-        raise Exception(f"خطأ من Gate.io: {e}") from e
+        raise Exception("مشكلة في الاتصال بـ Gate.io") from e
     except Exception as e:
-        logger.error(f"Unexpected error fetching USDT balance: {e}")
-        raise Exception(f"خطأ غير متوقع في جلب الرصيد: {e}") from e
+        raise Exception(f"خطأ في جلب الرصيد: {e}") from e
 
-# ─── الأسعار ────────────────────────────────────────────────────────────────
-
+# ─── Prices ───────────────────────────────────────────────────────────────────
 async def get_ticker_price(symbol, *a):
     return _client().fetch_ticker(_normalize(symbol))['last']
 
-# ─── أوامر الشراء والبيع ────────────────────────────────────────────────────
-
+# ─── Orders ───────────────────────────────────────────────────────────────────
 async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
-    """
-    تنفيذ أمر شراء سوقي مع:
-    - التأكد من الحد الأدنى للصفقة
-    - تنسيق الكمية حسب دقة السوق
-    - تمرير السعر لـ Gate.io (إصلاح الخطأ)
-    """
+    norm = _normalize(symbol)
+
+    # ❌ Filter: Stablecoins
+    if _is_stable_pair(symbol):
+        raise ValueError(f"⛔ {symbol} عملة مستقرة — تم الرفض")
+
+    # ❌ Filter: Market Cap > 5B
+    mcap = _get_market_cap(symbol)
+    if mcap > MAX_MARKET_CAP:
+        raise ValueError(f"⛔ {symbol} ماركت كاب ${mcap/1e9:.1f}B > 5B — تم الرفض")
+
     if usdt_amount < 1:
         raise ValueError(f"المبلغ {usdt_amount} أقل من الحد الأدنى ($1)")
 
     e = _client()
-    norm = _normalize(symbol)
-
-    # جلب السعر الحالي
     p = e.fetch_ticker(norm)['last']
     if not p or p <= 0:
         raise ValueError(f"سعر غير صالح لـ {symbol}: {p}")
 
-    # حساب الكمية وتنسيقها
     raw_qty = usdt_amount / p
     qty = _format_qty(symbol, raw_qty)
 
-    # التأكد من الحد الأدنى للكمية
     min_qty = _get_min_amount(symbol)
     if qty < min_qty:
         qty = math.ceil(min_qty * 1000000) / 1000000
-        logger.info(f"Adjusted qty to minimum {qty} for {symbol}")
 
-    # التأكد من الحد الأدنى للقيمة
     min_cost = _get_min_cost(symbol)
     actual_cost = qty * p
     if actual_cost < min_cost:
         qty = _format_qty(symbol, min_cost / p)
-        logger.info(f"Adjusted qty to meet min cost ${min_cost}: {qty}")
 
-    # ✅ تنسيق السعر للـ Gate.io
     formatted_price = _format_price(symbol, p)
+    logger.info(f"BUY: {symbol} | qty={qty} | price≈{p} | mcap≈${mcap/1e6:.0f}M")
 
-    logger.info(f"Placing BUY order: {symbol} | qty={qty} | price≈{p} | cost≈{qty*p:.2f} USDT")
-
-    # ✅ الإصلاح الرئيسي: تمرير السعر كـ parameter ثالث
+    # ✅ FIX: Pass price as 3rd argument for Gate.io
     o = e.create_market_buy_order(norm, qty, formatted_price)
 
     filled = float(o.get('filled', 0))
     cost = float(o.get('cost', 0))
-
     logger.info(f"BUY filled: {filled} {symbol} @ ${cost/filled if filled else p:.4f}")
 
     return {
@@ -212,26 +204,20 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
     }
 
 async def place_sell_order(api_key, api_secret, symbol, quantity):
-    """
-    تنفيذ أمر بيع سوقي مع تنسيق الكمية
-    """
     if quantity <= 0:
         raise ValueError(f"كمية البيع صفر أو سالبة: {quantity}")
 
     e = _client()
     norm = _normalize(symbol)
-
     qty = _format_qty(symbol, quantity)
     if qty <= 0:
         raise ValueError(f"الكمية المنقحة صفر لـ {symbol}")
 
-    logger.info(f"Placing SELL order: {symbol} | qty={qty}")
-
+    logger.info(f"SELL: {symbol} | qty={qty}")
     o = e.create_market_sell_order(norm, qty)
 
     filled = float(o.get('filled', 0))
     cost = float(o.get('cost', 0))
-
     logger.info(f"SELL filled: {filled} {symbol} @ ${cost/filled if filled else 0:.4f}")
 
     return {
@@ -243,13 +229,10 @@ async def place_sell_order(api_key, api_secret, symbol, quantity):
         'cost': cost
     }
 
-# ─── الشموع ──────────────────────────────────────────────────────────────────
-
+# ─── Klines & Top Symbols ───────────────────────────────────────────────────
 async def get_klines(symbol, interval='5m', limit=60):
     ohlcv = _client().fetch_ohlcv(_normalize(symbol), timeframe=interval, limit=limit)
     return [{'open': o[1], 'high': o[2], 'low': o[3], 'close': o[4], 'volume': o[5]} for o in ohlcv]
-
-# ─── أعلى العملات ────────────────────────────────────────────────────────────
 
 async def get_top_symbols(count=200):
     syms = []
