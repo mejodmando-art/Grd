@@ -1,4 +1,4 @@
-import ccxt, os, logging, math, urllib.request, json, asyncio
+import ccxt, os, logging, math, urllib.request, json
 
 logger = logging.getLogger("GateClient")
 
@@ -13,7 +13,7 @@ def _client():
             'secret': os.getenv('GATE_API_SECRET', ''),
             'options': {
                 'defaultType': 'spot',
-                'createMarketBuyOrderRequiresPrice': True,  # ✅ إجبار Gate.io على قبول السعر
+                'createMarketBuyOrderRequiresPrice': False,  # ✅ الحل
             },
             'enableRateLimit': True,
             'rateLimit': 100,
@@ -84,36 +84,7 @@ def _format_qty(symbol: str, qty: float) -> float:
             return round(qty, 6)
     return round(qty, 6)
 
-def _format_price(symbol: str, price: float) -> float:
-    info = _get_market_info(symbol)
-    if info:
-        try:
-            e = _client()
-            formatted = e.price_to_precision(_normalize(symbol), price)
-            return float(formatted)
-        except Exception as ex:
-            logger.warning(f"price_to_precision failed for {symbol}: {ex}")
-            return round(price, 8)
-    return round(price, 8)
-
-def _get_min_amount(symbol: str) -> float:
-    info = _get_market_info(symbol)
-    if info:
-        limits = info.get('limits', {})
-        amount_min = limits.get('amount', {}).get('min')
-        cost_min = limits.get('cost', {}).get('min')
-        return max(amount_min or 0, (cost_min or 0) / 1000)
-    return 0.0001
-
-def _get_min_cost(symbol: str) -> float:
-    info = _get_market_info(symbol)
-    if info:
-        limits = info.get('limits', {})
-        cost_min = limits.get('cost', {}).get('min')
-        return cost_min or 1.0
-    return 1.0
-
-# ─── Balance (مُحسّن — أسرع) ─────────────────────────────────────────────────
+# ─── Balance (مُحسّن) ────────────────────────────────────────────────────────
 async def get_balance(*a):
     try:
         exchange = _client()
@@ -149,7 +120,7 @@ async def get_usdt_free():
 async def get_ticker_price(symbol, *a):
     return _client().fetch_ticker(_normalize(symbol))['last']
 
-# ─── Orders (الإصلاح النهائي) ──────────────────────────────────────────────
+# ─── Orders (الإصلاح النهائي) ───────────────────────────────────────────────
 async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
     norm = _normalize(symbol)
 
@@ -169,42 +140,29 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
     if not p or p <= 0:
         raise ValueError(f"سعر غير صالح لـ {symbol}: {p}")
 
-    raw_qty = usdt_amount / p
-    qty = _format_qty(symbol, raw_qty)
+    # ✅ الحل: amount = مبلغ USDT (مش كمية العملة)
+    # لأن createMarketBuyOrderRequiresPrice = False
+    logger.info(f"BUY: {symbol} | amount={usdt_amount} USDT | price≈{p}")
 
-    min_qty = _get_min_amount(symbol)
-    if qty < min_qty:
-        qty = math.ceil(min_qty * 1000000) / 1000000
-
-    min_cost = _get_min_cost(symbol)
-    actual_cost = qty * p
-    if actual_cost < min_cost:
-        qty = _format_qty(symbol, min_cost / p)
-
-    formatted_price = _format_price(symbol, p)
-    logger.info(f"BUY: {symbol} | qty={qty} | price≈{p}")
-
-    # ✅ الإصلاح النهائي: استخدام params dict
-    # Gate.io يحتاج 'cost' (المبلغ الإجمالي) مش 'price'
-    cost = qty * formatted_price
-    params = {
-        'cost': cost,  # Gate.io يحسب من ده
-    }
-    
-    o = e.create_market_buy_order(norm, qty, params)
-
-    filled = float(o.get('filled', 0))
-    cost_result = float(o.get('cost', 0))
-    logger.info(f"BUY filled: {filled} {symbol}")
-
-    return {
-        'order_id': o.get('id', ''),
-        'symbol': symbol,
-        'side': 'buy',
-        'quantity': filled,
-        'entry_price': round(cost_result / filled if filled else p, 8),
-        'cost': cost_result
-    }
+    try:
+        o = e.create_market_buy_order(norm, usdt_amount)
+        
+        logger.info(f"✅ ORDER SUCCESS: {o}")
+        
+        filled = float(o.get('filled', 0))
+        cost = float(o.get('cost', 0))
+        
+        return {
+            'order_id': o.get('id', ''),
+            'symbol': symbol,
+            'side': 'buy',
+            'quantity': filled,
+            'entry_price': round(cost / filled if filled else p, 8),
+            'cost': cost
+        }
+    except Exception as ex:
+        logger.error(f"❌ ORDER FAILED: {ex}")
+        raise ValueError(f"فشل الشراء: {ex}")
 
 async def place_sell_order(api_key, api_secret, symbol, quantity):
     if quantity <= 0:
