@@ -1,0 +1,45 @@
+//@version=6
+strategy(title = 'UT Bot SPOT — BTC/ETH 15m', shorttitle = "UT Bot SPOT", overlay = true, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+// ─── INPUTS ────────────────────────────────────────────────────────────────
+mult        = input.float(2.0,    title = 'ATR Multiplier',  minval = 0.5, step = 0.1, group = "UT Bot")
+atr_len     = input.int(10,       title = 'ATR Period',      minval = 1, group = "UT Bot")
+
+// ─── CALCULATIONS ────────────────────────────────────────────────────────────
+atr = ta.atr(atr_len)
+sl_value = mult * atr
+
+// UT Bot Trailing Stop
+tsl_price = 0.0
+tsl_price :=  close > tsl_price[1] and close[1] > tsl_price[1] ? math.max(nz(tsl_price[1]), close - sl_value) : 
+              close < tsl_price[1] and close[1] < tsl_price[1] ? math.min(nz(tsl_price[1]), close + sl_value) : 
+              close > tsl_price[1] ? close - sl_value : 
+              close + sl_value
+
+// ─── SIGNALS ─────────────────────────────────────────────────────────────────
+buy_signal  = ta.crossover(close, tsl_price)  and barstate.isconfirmed
+sell_signal = ta.crossover(tsl_price, close)     and barstate.isconfirmed
+
+// ─── PLOTS ───────────────────────────────────────────────────────────────────
+plot(tsl_price, color = buy_signal ? color.green : sell_signal ? color.red : color.gray, linewidth = 2, title = "UT Bot TSL")
+
+plotshape(buy_signal,  title = 'BUY',  text = 'BUY',  style = shape.labelup,   location = location.belowbar, 
+ color = color.green, textcolor = color.white, size = size.small)
+
+plotshape(sell_signal, title = 'SELL', text = 'SELL', style = shape.labeldown, location = location.abovebar, 
+ color = color.red,   textcolor = color.white, size = size.small)
+
+// ─── ALERTS FOR BOT ──────────────────────────────────────────────────────────
+// SPOT: Buy = open position, Sell = close position (no short)
+if buy_signal
+    alert('{"symbol":"BTCUSDT","side":"buy","strategy":"UT_BOT","price":"' + str.tostring(close) + '","action":"open"}', alert.freq_once_per_bar_close)
+
+if sell_signal
+    alert('{"symbol":"BTCUSDT","side":"sell","strategy":"UT_BOT","price":"' + str.tostring(close) + '","action":"close"}', alert.freq_once_per_bar_close)
+
+// ─── STRATEGY (for backtesting only) ──────────────────────────────────────────
+if buy_signal
+    strategy.entry("Long", strategy.long)
+
+if sell_signal
+    strategy.close("Long", comment = "Exit")
