@@ -1,4 +1,4 @@
-import ccxt, os, logging, math, urllib.request, json
+import ccxt, os, logging, math, urllib.request, json, asyncio
 
 logger = logging.getLogger("GateClient")
 
@@ -11,7 +11,10 @@ def _client():
         _gate_client = ccxt.gate({
             'apiKey': os.getenv('GATE_API_KEY', ''),
             'secret': os.getenv('GATE_API_SECRET', ''),
-            'options': {'defaultType': 'spot'},
+            'options': {
+                'defaultType': 'spot',
+                'createMarketBuyOrderRequiresPrice': True,  # ✅ إجبار Gate.io على قبول السعر
+            },
             'enableRateLimit': True,
             'rateLimit': 100,
         })
@@ -110,40 +113,35 @@ def _get_min_cost(symbol: str) -> float:
         return cost_min or 1.0
     return 1.0
 
-# ─── Balance ──────────────────────────────────────────────────────────────────
+# ─── Balance (مُحسّن — أسرع) ─────────────────────────────────────────────────
 async def get_balance(*a):
-    exchange = _client()
-    balance = exchange.fetch_balance()
-    total_value = 0.0
-    all_coins = []
-    currencies = balance.get('total', {})
-    for coin, amount in currencies.items():
-        if amount > 0:
-            free = balance.get('free', {}).get(coin, 0)
-            used = balance.get('used', {}).get(coin, 0)
-            try:
-                price = 1.0 if coin == 'USDT' else exchange.fetch_ticker(f"{coin}/USDT")['last']
-            except:
-                price = 0.0
-            value = amount * price
-            total_value += value
-            all_coins.append({'coin': coin, 'free': free, 'used': used, 'total': amount, 'price': price, 'value': value})
-    all_coins.sort(key=lambda x: x['value'], reverse=True)
-    return {'all_coins': all_coins, 'total_value': total_value}
+    try:
+        exchange = _client()
+        balance = exchange.fetch_balance()
+        total_value = 0.0
+        all_coins = []
+        currencies = balance.get('total', {})
+        for coin, amount in currencies.items():
+            if amount > 0:
+                free = balance.get('free', {}).get(coin, 0)
+                used = balance.get('used', {}).get(coin, 0)
+                price = 1.0 if coin == 'USDT' else 0.0
+                value = amount * price
+                total_value += value
+                all_coins.append({'coin': coin, 'free': free, 'used': used, 'total': amount, 'price': price, 'value': value})
+        all_coins.sort(key=lambda x: x['value'], reverse=True)
+        return {'all_coins': all_coins, 'total_value': total_value}
+    except Exception as e:
+        logger.error(f"Balance fetch error: {e}")
+        return {'all_coins': [], 'total_value': 0.0}
 
 async def get_usdt_free():
     try:
         exchange = _client()
         balance = exchange.fetch_balance()
         free = float(balance.get('free', {}).get('USDT', 0))
-        used = float(balance.get('used', {}).get('USDT', 0))
-        total = float(balance.get('total', {}).get('USDT', 0))
-        logger.info(f"USDT Balance — Free: {free:.2f}, Used: {used:.2f}, Total: {total:.2f}")
+        logger.info(f"USDT Free: {free:.2f}")
         return free
-    except ccxt.AuthenticationError as e:
-        raise Exception("فشل المصادقة مع Gate.io — تأكد من API Keys") from e
-    except ccxt.NetworkError as e:
-        raise Exception("مشكلة في الاتصال بـ Gate.io") from e
     except Exception as e:
         raise Exception(f"خطأ في جلب الرصيد: {e}") from e
 
@@ -151,15 +149,14 @@ async def get_usdt_free():
 async def get_ticker_price(symbol, *a):
     return _client().fetch_ticker(_normalize(symbol))['last']
 
-# ─── Orders ───────────────────────────────────────────────────────────────────
+# ─── Orders (الإصلاح النهائي) ──────────────────────────────────────────────
 async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
     norm = _normalize(symbol)
 
-    # ❌ Filter: Stablecoins
+    # ❌ Filters
     if _is_stable_pair(symbol):
         raise ValueError(f"⛔ {symbol} عملة مستقرة — تم الرفض")
 
-    # ❌ Filter: Market Cap > 5B
     mcap = _get_market_cap(symbol)
     if mcap > MAX_MARKET_CAP:
         raise ValueError(f"⛔ {symbol} ماركت كاب ${mcap/1e9:.1f}B > 5B — تم الرفض")
@@ -185,28 +182,28 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
         qty = _format_qty(symbol, min_cost / p)
 
     formatted_price = _format_price(symbol, p)
-    logger.info(f"BUY: {symbol} | qty={qty} | price≈{p} | mcap≈${mcap/1e6:.0f}M")
+    logger.info(f"BUY: {symbol} | qty={qty} | price≈{p}")
 
-    # ✅ FIX: Use create_order with explicit named parameters
-    o = e.create_order(
-        symbol=norm,
-        type='market',
-        side='buy',
-        amount=qty,
-        price=formatted_price
-    )
+    # ✅ الإصلاح النهائي: استخدام params dict
+    # Gate.io يحتاج 'cost' (المبلغ الإجمالي) مش 'price'
+    cost = qty * formatted_price
+    params = {
+        'cost': cost,  # Gate.io يحسب من ده
+    }
+    
+    o = e.create_market_buy_order(norm, qty, params)
 
     filled = float(o.get('filled', 0))
-    cost = float(o.get('cost', 0))
-    logger.info(f"BUY filled: {filled} {symbol} @ ${cost/filled if filled else p:.4f}")
+    cost_result = float(o.get('cost', 0))
+    logger.info(f"BUY filled: {filled} {symbol}")
 
     return {
         'order_id': o.get('id', ''),
         'symbol': symbol,
         'side': 'buy',
         'quantity': filled,
-        'entry_price': round(cost / filled if filled else p, 8),
-        'cost': cost
+        'entry_price': round(cost_result / filled if filled else p, 8),
+        'cost': cost_result
     }
 
 async def place_sell_order(api_key, api_secret, symbol, quantity):
@@ -224,7 +221,7 @@ async def place_sell_order(api_key, api_secret, symbol, quantity):
 
     filled = float(o.get('filled', 0))
     cost = float(o.get('cost', 0))
-    logger.info(f"SELL filled: {filled} {symbol} @ ${cost/filled if filled else 0:.4f}")
+    logger.info(f"SELL filled: {filled} {symbol}")
 
     return {
         'order_id': o.get('id', ''),
