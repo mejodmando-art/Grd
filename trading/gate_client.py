@@ -13,7 +13,7 @@ def _client():
             'secret': os.getenv('GATE_API_SECRET', ''),
             'options': {
                 'defaultType': 'spot',
-                'createMarketBuyOrderRequiresPrice': False,  # ✅ الحل
+                'createMarketBuyOrderRequiresPrice': False,
             },
             'enableRateLimit': True,
             'rateLimit': 100,
@@ -27,11 +27,17 @@ def _normalize(symbol: str) -> str:
 
 # ─── Filters ──────────────────────────────────────────────────────────────────
 STABLECOINS = {'USDT', 'USDC', 'DAI', 'BUSD', 'TUSD', 'FDUSD', 'USDE', 'PYUSD'}
-MAX_MARKET_CAP = 5_000_000_000
+# For UT Bot: BTC and ETH only (raised limit)
+UT_BOT_SYMBOLS = {'BTC', 'ETH'}
+MAX_MARKET_CAP = 50_000_000_000  # 50B for BTC/ETH
 
 def _is_stable_pair(symbol: str) -> bool:
     base = symbol.replace('/USDT', '').replace('USDT', '').upper()
     return base in STABLECOINS
+
+def _is_ut_bot_symbol(symbol: str) -> bool:
+    base = symbol.replace('/USDT', '').replace('USDT', '').upper()
+    return base in UT_BOT_SYMBOLS
 
 _MCAP_CACHE = {}
 
@@ -84,7 +90,7 @@ def _format_qty(symbol: str, qty: float) -> float:
             return round(qty, 6)
     return round(qty, 6)
 
-# ─── Balance (مُحسّن) ────────────────────────────────────────────────────────
+# ─── Balance ──────────────────────────────────────────────────────────────────
 async def get_balance(*a):
     try:
         exchange = _client()
@@ -116,42 +122,52 @@ async def get_usdt_free():
     except Exception as e:
         raise Exception(f"خطأ في جلب الرصيد: {e}") from e
 
+async def get_coin_balance(symbol: str) -> float:
+    """Get balance of a specific coin (e.g. BTC, ETH)"""
+    try:
+        base = symbol.replace('USDT', '').replace('/USDT', '')
+        exchange = _client()
+        balance = exchange.fetch_balance()
+        free = float(balance.get('free', {}).get(base, 0))
+        logger.info(f"{base} Free: {free:.6f}")
+        return free
+    except Exception as e:
+        logger.error(f"Error fetching {symbol} balance: {e}")
+        return 0.0
+
 # ─── Prices ───────────────────────────────────────────────────────────────────
 async def get_ticker_price(symbol, *a):
     return _client().fetch_ticker(_normalize(symbol))['last']
 
-# ─── Orders (الإصلاح النهائي) ───────────────────────────────────────────────
+# ─── Orders ───────────────────────────────────────────────────────────────────
 async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
+    """SPOT Buy: Open position"""
     norm = _normalize(symbol)
 
-    # ❌ Filters
     if _is_stable_pair(symbol):
-        raise ValueError(f"⛔ {symbol} عملة مستقرة — تم الرفض")
+        raise ValueError(f"⛔ {symbol} عملة مستقرة")
 
-    mcap = _get_market_cap(symbol)
-    if mcap > MAX_MARKET_CAP:
-        raise ValueError(f"⛔ {symbol} ماركت كاب ${mcap/1e9:.1f}B > 5B — تم الرفض")
+    # For UT Bot: allow BTC/ETH even if mcap > 5B
+    if not _is_ut_bot_symbol(symbol):
+        mcap = _get_market_cap(symbol)
+        if mcap > 5_000_000_000:
+            raise ValueError(f"⛔ {symbol} ماركت كاب كبير")
 
     if usdt_amount < 1:
-        raise ValueError(f"المبلغ {usdt_amount} أقل من الحد الأدنى ($1)")
+        raise ValueError(f"المبلغ {usdt_amount} أقل من الحد الأدنى")
 
     e = _client()
     p = e.fetch_ticker(norm)['last']
     if not p or p <= 0:
-        raise ValueError(f"سعر غير صالح لـ {symbol}: {p}")
+        raise ValueError(f"سعر غير صالح: {p}")
 
-    # ✅ الحل: amount = مبلغ USDT (مش كمية العملة)
-    # لأن createMarketBuyOrderRequiresPrice = False
-    logger.info(f"BUY: {symbol} | amount={usdt_amount} USDT | price≈{p}")
+    logger.info(f"BUY (Open): {symbol} | amount={usdt_amount} USDT | price≈{p}")
 
     try:
         o = e.create_market_buy_order(norm, usdt_amount)
-        
-        logger.info(f"✅ ORDER SUCCESS: {o}")
-        
         filled = float(o.get('filled', 0))
         cost = float(o.get('cost', 0))
-        
+        logger.info(f"✅ BUY filled: {filled} {symbol} @ ${cost/filled if filled else p:.4f}")
         return {
             'order_id': o.get('id', ''),
             'symbol': symbol,
@@ -161,25 +177,26 @@ async def place_buy_order(api_key, api_secret, symbol, usdt_amount):
             'cost': cost
         }
     except Exception as ex:
-        logger.error(f"❌ ORDER FAILED: {ex}")
+        logger.error(f"❌ BUY failed: {ex}")
         raise ValueError(f"فشل الشراء: {ex}")
 
 async def place_sell_order(api_key, api_secret, symbol, quantity):
+    """SPOT Sell: Close position (sell what you have)"""
     if quantity <= 0:
-        raise ValueError(f"كمية البيع صفر أو سالبة: {quantity}")
+        raise ValueError(f"كمية البيع صفر: {quantity}")
 
     e = _client()
     norm = _normalize(symbol)
     qty = _format_qty(symbol, quantity)
     if qty <= 0:
-        raise ValueError(f"الكمية المنقحة صفر لـ {symbol}")
+        raise ValueError(f"الكمية المنقحة صفر")
 
-    logger.info(f"SELL: {symbol} | qty={qty}")
+    logger.info(f"SELL (Close): {symbol} | qty={qty}")
     o = e.create_market_sell_order(norm, qty)
 
     filled = float(o.get('filled', 0))
     cost = float(o.get('cost', 0))
-    logger.info(f"SELL filled: {filled} {symbol}")
+    logger.info(f"✅ SELL filled: {filled} {symbol} @ ${cost/filled if filled else 0:.4f}")
 
     return {
         'order_id': o.get('id', ''),
@@ -191,7 +208,7 @@ async def place_sell_order(api_key, api_secret, symbol, quantity):
     }
 
 # ─── Klines & Top Symbols ───────────────────────────────────────────────────
-async def get_klines(symbol, interval='5m', limit=60):
+async def get_klines(symbol, interval='15m', limit=60):
     ohlcv = _client().fetch_ohlcv(_normalize(symbol), timeframe=interval, limit=limit)
     return [{'open': o[1], 'high': o[2], 'low': o[3], 'close': o[4], 'volume': o[5]} for o in ohlcv]
 
