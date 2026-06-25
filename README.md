@@ -1,86 +1,37 @@
-# 🤖 GRD Trading Bot
+# 🎯 UT Bot SPOT Edition v4.0
 
-بوت تداول آلي للعملات الرقمية على تليغرام مع تكامل MEXC و Supabase.
+## مميزات الإصدار
 
-## ✨ المميزات
+### 🎯 UT Bot (جديد)
+- **فريم:** 15 دقيقة
+- **الإشارات:** Buy (فتح) / Sell (إغلاق)
+- **المنطق:** ATR Trailing Stop
+- **SPOT فقط:** لا Short
 
-- 📊 **إشارات التداول** – استقبال وإرسال إشارات التداول
-- ⚡ **تنفيذ تلقائي** – شراء تلقائي عند وصول الإشارة
-- 🎯 **TP/SL تلقائي** – إغلاق الصفقة تلقائياً عند تحقق الهدف أو وقف الخسارة  
-- 💬 **أزرار تيليغرام** – تحكم كامل بأزرار بدون أوامر نصية
-- 💾 **Supabase** – حفظ جميع البيانات في قاعدة بيانات سحابية
-- 🔑 **API شخصي** – كل مستخدم يضيف مفاتيح MEXC الخاصة به
+### الاستراتيجيات المتاحة
+| الاستراتيجية | الوصف | الفريم |
+|-------------|-------|--------|
+| 📈 EMA | متابعة الترند | 5m |
+| 🐋 Harpoon | صيد الحركات السريعة | 5m |
+| 🎯 UT Bot | ATR Trailing Stop | **15m** |
+| 🦁 SPHINX | مسح السيولة + تباعد الزخم | 15m |
 
-## 🚀 النشر على Railway
+## إعداد TradingView
 
-### 1. متطلبات
+1. افتح **BTC/USDT** على **Binance**
+2. فريم **15 دقيقة**
+3. اضف المؤشر: **UT Bot SPOT**
+4. اضبط الـ Alert:
+   - **Webhook URL:** URL بتاع البوت
+   - **Message:** `{"symbol":"BTCUSDT","side":"buy","strategy":"UT_BOT"}`
 
-- حساب [Railway](https://railway.app/)
-- بوت تيليغرام من [@BotFather](https://t.me/botfather)
-- مفاتيح API من [MEXC](https://www.mexc.com/user/openapi)
-- مشروع [Supabase](https://supabase.com/)
+## SPOT Rules
+- ✅ Buy = اشتري بـ USDT
+- ✅ Sell = بيع الكمية اللي معاك
+- ❌ Short = ممنوع في SPOT
 
-### 2. إعداد Supabase
+## التثبيت
 
-1. أنشئ مشروع جديد على Supabase
-2. اذهب إلى **SQL Editor**
-3. انسخ محتوى ملف `supabase_schema.sql` والصقه وشغّله
-4. احفظ `Project URL` و `anon key` من **Settings > API**
-
-### 3. النشر على Railway
-
-1. اضغط **New Project > Deploy from GitHub**
-2. اختر هذا المستودع
-3. أضف المتغيرات البيئية التالية:
-
-| المتغير | الوصف |
-|---------|-------|
-| `TELEGRAM_TOKEN` | توكن البوت من BotFather |
-| `ADMIN_IDS` | معرفات الأدمن مفصولة بفاصلة (مثل: `123456,789012`) |
-| `MEXC_API_KEY` | (اختياري) مفتاح MEXC الافتراضي |
-| `MEXC_API_SECRET` | (اختياري) سر MEXC الافتراضي |
-| `SUPABASE_URL` | رابط مشروع Supabase |
-| `SUPABASE_KEY` | المفتاح السري من Supabase |
-| `MONITOR_INTERVAL` | فترة مراقبة الصفقات بالثواني (افتراضي: `30`) |
-
-4. اضغط **Deploy**
-
-## 📱 كيفية الاستخدام
-
-### للمستخدم
-1. ابدأ البوت بـ `/start`
-2. اذهب إلى ⚙️ **الإعدادات** وأضف مفاتيح MEXC API
-3. انتظر الإشارات أو فعّل **التداول التلقائي** 🤖
-
-### للأدمن
-1. اضغط **📤 إرسال إشارة**
-2. أدخل اسم العملة (مثل: `BTCUSDT`)
-3. اختر الاتجاه: 🟢 LONG أو 🔴 SHORT
-4. أدخل مستويات الدخول والهدف ووقف الخسارة
-5. سيتم إرسال الإشارة لجميع المشتركين تلقائياً
-
-## 📁 هيكل المشروع
-
-```
-├── main.py                 # نقطة البداية
-├── config.py               # الإعدادات
-├── requirements.txt        # المتطلبات
-├── Procfile               # Railway
-├── railway.toml           # إعداد Railway
-├── supabase_schema.sql    # جداول قاعدة البيانات
-├── bot/
-│   ├── handlers.py        # معالجات الأحداث
-│   ├── keyboards.py       # أزرار التيليغرام
-│   └── messages.py        # النصوص
-├── trading/
-│   ├── mexc_client.py     # تكامل MEXC
-│   └── monitor.py         # مراقبة الصفقات
-├── database/
-│   └── client.py          # تكامل Supabase
-└── signals/
-    └── processor.py       # معالجة الإشارات
-```
-
-## ⚠️ تنبيه
-
-هذا البوت للأغراض التعليمية. التداول بالعملات الرقمية ينطوي على مخاطر مالية.
+1. **Supabase:** شغّل `supabase_schema.sql`
+2. **GitHub:** استبدل الملفات
+3. **Railway:** Redeploy
